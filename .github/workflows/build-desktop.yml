@@ -35,8 +35,42 @@ jobs:
         run: flutter pub get
       - name: Analyze source
         run: flutter analyze
-      - name: Run tests
+      - name: Run tests on macOS
+        if: matrix.target == 'macos'
         run: flutter test
+      - name: Run tests on Windows with failure details
+        if: matrix.target == 'windows'
+        shell: pwsh
+        run: |
+          $lines = & flutter test --reporter=json 2>&1
+          $testExit = $LASTEXITCODE
+          $events = @()
+          foreach ($line in $lines) {
+            $text = $line.ToString()
+            Write-Output $text
+            try { $events += ($text | ConvertFrom-Json -ErrorAction Stop) } catch { }
+          }
+          if ($testExit -ne 0) {
+            $testNames = @{}
+            foreach ($event in $events) {
+              if ($event.type -eq 'testStart' -and $event.test.id -ne $null) {
+                $testNames[[string]$event.test.id] = $event.test.name
+              }
+            }
+            foreach ($event in $events) {
+              if ($event.type -eq 'testDone' -and $event.result -eq 'failure') {
+                $id = [string]$event.testID
+                $name = $testNames[$id]
+                if (-not $name) { $name = "testID=$id" }
+                Write-Output "::error title=Flutter test failure::$name"
+              }
+              if ($event.type -eq 'error' -and $event.error) {
+                $message = ($event.error -replace '[\r\n]+', ' ')
+                Write-Output "::error title=Flutter test detail::$message"
+              }
+            }
+          }
+          exit $testExit
       - name: Build release
         run: flutter build ${{ matrix.target }} --release
       - name: Sign and package macOS application
