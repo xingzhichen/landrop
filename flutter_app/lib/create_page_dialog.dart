@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import 'app_theme.dart';
+import 'workspace_motion.dart';
 
 typedef PickShareFiles = Future<List<PlatformFile>> Function();
 
@@ -125,12 +126,13 @@ class _CreatePageDialogState extends State<CreatePageDialog> {
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    OutlinedButton.icon(
+                    ActionMotion(
+                        child: OutlinedButton.icon(
                       key: CreatePageDialog.pickFilesKey,
                       onPressed: _picking ? null : _pickFiles,
                       icon: const Icon(Icons.folder_open_outlined, size: 19),
                       label: const Text('选择文件（可多选）'),
-                    ),
+                    )),
                     const SizedBox(height: 8),
                     const Text('可一次选择多个文件，原文件保留在本机。',
                         style: TextStyle(
@@ -181,19 +183,21 @@ class _CreatePageDialogState extends State<CreatePageDialog> {
         ),
       ),
       actions: [
-        TextButton(
+        ActionMotion(
+            child: TextButton(
           key: CreatePageDialog.cancelKey,
           onPressed: _picking ? null : _cancel,
           child: const Text('取消'),
-        ),
-        FilledButton(
+        )),
+        ActionMotion(
+            child: FilledButton(
           key: CreatePageDialog.submitKey,
           onPressed:
               _picking || _input.text.trim().isEmpty || _selections.isEmpty
                   ? null
                   : _submit,
           child: const Text('创建并启动'),
-        ),
+        )),
       ],
     );
   }

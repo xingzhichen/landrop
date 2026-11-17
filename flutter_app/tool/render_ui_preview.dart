@@ -14,6 +14,7 @@ void main(List<String> args) {
     DownloadItem(
         id: '00000000-0000-4000-8000-000000000002',
         name: '海边的日落.jpg',
+        relativePath: '周末旅行/照片/海边的日落.jpg',
         size: 5242880),
     DownloadItem(
         id: '00000000-0000-4000-8000-000000000003',

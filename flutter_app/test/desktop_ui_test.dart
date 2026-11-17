@@ -53,6 +53,17 @@ class _PreviewController extends LanDropController {
           pageTitle: '周末旅行',
           receivedAt: DateTime(2026, 11, 17, 19, 32)));
     }
+    if (!empty) {
+      transfers.add(TransferTask(
+          id: 'preview-transfer',
+          pageId: pages.first.id,
+          pageTitle: pages.first.title,
+          name: '手机拍摄的旅行短片.mp4',
+          direction: 'upload',
+          totalBytes: 104857600,
+          transferredBytes: 67108864)
+        ..bytesPerSecond = 4194304);
+    }
     notifyListeners();
   }
 
@@ -196,6 +207,15 @@ void main() {
     await tester.pumpAndSettle();
     expect(copied, controller.receivedFiles.single.path);
     expect(find.text('文件路径已复制'), findsOneWidget);
+    ScaffoldMessenger.of(tester.element(find.byType(HomeScreen)))
+        .removeCurrentSnackBar();
+    for (final entry
+        in {'传输动态': 'desktop-transfers', '应用设置': 'desktop-settings'}.entries) {
+      await tester.tap(find.text(entry.key).first);
+      await tester.pumpAndSettle();
+      await tester.runAsync(() => _captureImage(key, entry.value));
+      expect(tester.takeException(), isNull);
+    }
     tester.binding.defaultBinaryMessenger
         .setMockMethodCallHandler(SystemChannels.platform, null);
     expect(tester.takeException(), isNull);

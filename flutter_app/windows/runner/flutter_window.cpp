@@ -12,8 +12,26 @@
 #include <variant>
 
 #include "flutter/generated_plugin_registrant.h"
+#include "resource.h"
 
 namespace {
+
+constexpr UINT kTrayMessage = WM_APP + 51;
+constexpr UINT kTrayId = 1;
+constexpr UINT kShowCommand = 1001;
+constexpr UINT kQuitCommand = 1002;
+constexpr wchar_t kDropOwner[] = L"LanDrop.DesktopShell.Owner";
+const UINT kTaskbarCreated = ::RegisterWindowMessageW(L"TaskbarCreated");
+
+std::string Utf8Path(const std::wstring& path) {
+  const int size = ::WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS,
+      path.data(), static_cast<int>(path.size()), nullptr, 0, nullptr, nullptr);
+  if (size <= 0) return {};
+  std::string utf8(static_cast<size_t>(size), '\0');
+  ::WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, path.data(),
+      static_cast<int>(path.size()), utf8.data(), size, nullptr, nullptr);
+  return utf8;
+}
 
 // Accept drive-rooted and UNC filesystem paths, but never relative paths,
 // URLs, or Win32 device namespaces such as \\?\ and \\.\.
@@ -177,6 +195,65 @@ bool FlutterWindow::OnCreate() {
         HandleFileManagerMethod(GetHandle(), call, std::move(result));
       });
   SetChildContent(flutter_controller_->view()->GetNativeWindow());
+  shell_window_ = GetHandle();
+  shell_channel_ =
+      std::make_unique<flutter::MethodChannel<flutter::EncodableValue>>(
+          flutter_controller_->engine()->messenger(), "landrop/desktop_shell",
+          &flutter::StandardMethodCodec::GetInstance());
+  shell_channel_->SetMethodCallHandler(
+      [this](const flutter::MethodCall<flutter::EncodableValue>& call,
+             std::unique_ptr<flutter::MethodResult<flutter::EncodableValue>> result) {
+        if (call.method_name() == "initialize") {
+          shell_ready_ = true;
+          if (!tray_installed_ && !InstallTrayIcon()) {
+            result->Error("tray_unavailable", "Cannot create notification icon; closing will exit.");
+            return;
+          }
+          result->Success();
+        } else if (call.method_name() == "showWindow") {
+          ShowShellWindow();
+          result->Success();
+        } else if (call.method_name() == "setBackgroundMode") {
+          const auto* args = call.arguments()
+              ? std::get_if<flutter::EncodableMap>(call.arguments()) : nullptr;
+          const bool* enabled = nullptr;
+          if (args) {
+            const auto it = args->find(flutter::EncodableValue("enabled"));
+            if (it != args->end()) enabled = std::get_if<bool>(&it->second);
+          }
+          if (!enabled) {
+            result->Error("invalid_arguments", "Expected enabled boolean.");
+            return;
+          }
+          background_mode_ = *enabled;
+          if (!background_mode_ && !::IsWindowVisible(shell_window_)) ShowShellWindow();
+          result->Success();
+        } else if (call.method_name() == "quit") {
+          result->Success();
+          RequestQuit();
+        } else {
+          result->NotImplemented();
+        }
+      });
+  InstallTrayIcon();
+  ::DragAcceptFiles(shell_window_, TRUE);
+  // The Flutter view is a child HWND and consumes messages before the runner.
+  // Subclass only this owned view; normal input always chains to Flutter.
+  drop_window_ = flutter_controller_->view()->GetNativeWindow();
+  if (::SetPropW(drop_window_, kDropOwner, this)) {
+    ::SetLastError(0);
+    const LONG_PTR previous = ::SetWindowLongPtrW(
+        drop_window_, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(DropWindowProc));
+    if (previous != 0) {
+      drop_window_proc_ = reinterpret_cast<WNDPROC>(previous);
+      ::DragAcceptFiles(drop_window_, TRUE);
+    } else {
+      ::RemovePropW(drop_window_, kDropOwner);
+      drop_window_ = nullptr;
+    }
+  } else {
+    drop_window_ = nullptr;
+  }
 
   flutter_controller_->engine()->SetNextFrameCallback([&]() {
     this->Show();
@@ -191,6 +268,22 @@ bool FlutterWindow::OnCreate() {
 }
 
 void FlutterWindow::OnDestroy() {
+  RemoveTrayIcon();
+  if (drop_window_ && ::IsWindow(drop_window_)) {
+    ::DragAcceptFiles(drop_window_, FALSE);
+    ::SetWindowLongPtrW(drop_window_, GWLP_WNDPROC,
+                       reinterpret_cast<LONG_PTR>(drop_window_proc_));
+    ::RemovePropW(drop_window_, kDropOwner);
+  }
+  drop_window_ = nullptr;
+  drop_window_proc_ = nullptr;
+  if (shell_window_ && ::IsWindow(shell_window_)) ::DragAcceptFiles(shell_window_, FALSE);
+  shell_window_ = nullptr;
+  shell_ready_ = false;
+  if (shell_channel_) {
+    shell_channel_->SetMethodCallHandler(nullptr);
+    shell_channel_.reset();
+  }
   if (file_manager_channel_) {
     file_manager_channel_->SetMethodCallHandler(nullptr);
     file_manager_channel_.reset();
@@ -202,10 +295,131 @@ void FlutterWindow::OnDestroy() {
   Win32Window::OnDestroy();
 }
 
+void FlutterWindow::ShowShellWindow() {
+  ::ShowWindow(shell_window_, ::IsIconic(shell_window_) ? SW_RESTORE : SW_SHOW);
+  ::SetForegroundWindow(shell_window_);
+  if (shell_ready_ && shell_channel_) shell_channel_->InvokeMethod("showWindow", nullptr);
+}
+
+void FlutterWindow::RequestQuit() {
+  quitting_ = true;
+  // Post instead of destroying the engine while a method callback is active.
+  ::PostMessageW(shell_window_, WM_CLOSE, 0, 0);
+}
+
+bool FlutterWindow::InstallTrayIcon() {
+  if (!shell_window_) return false;
+  NOTIFYICONDATAW icon = {};
+  icon.cbSize = sizeof(icon);
+  icon.hWnd = shell_window_;
+  icon.uID = kTrayId;
+  icon.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
+  icon.uCallbackMessage = kTrayMessage;
+  icon.hIcon = ::LoadIconW(::GetModuleHandleW(nullptr), MAKEINTRESOURCEW(IDI_APP_ICON));
+  if (!icon.hIcon) icon.hIcon = ::LoadIconW(nullptr, MAKEINTRESOURCEW(32512));
+  ::lstrcpynW(icon.szTip, L"LanDrop", ARRAYSIZE(icon.szTip));
+  tray_installed_ = ::Shell_NotifyIconW(NIM_ADD, &icon) != FALSE;
+  return tray_installed_;
+}
+
+void FlutterWindow::RemoveTrayIcon() {
+  if (!tray_installed_) return;
+  NOTIFYICONDATAW icon = {};
+  icon.cbSize = sizeof(icon);
+  icon.hWnd = shell_window_;
+  icon.uID = kTrayId;
+  ::Shell_NotifyIconW(NIM_DELETE, &icon);
+  tray_installed_ = false;
+}
+
+void FlutterWindow::ShowTrayMenu() {
+  HMENU menu = ::CreatePopupMenu();
+  if (!menu) return;
+  // Unicode escapes keep this source compatible with non-UTF8 MSVC locales.
+  ::AppendMenuW(menu, MF_STRING, kShowCommand, L"\u663e\u793a\u7a97\u53e3");
+  ::AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+  ::AppendMenuW(menu, MF_STRING, kQuitCommand, L"\u9000\u51fa LanDrop");
+  POINT position = {};
+  ::GetCursorPos(&position);
+  ::SetForegroundWindow(shell_window_);
+  const UINT command = ::TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON,
+      position.x, position.y, 0, shell_window_, nullptr);
+  ::DestroyMenu(menu);
+  ::PostMessageW(shell_window_, WM_NULL, 0, 0);
+  if (command == kShowCommand) ShowShellWindow();
+  if (command == kQuitCommand) RequestQuit();
+}
+
+void FlutterWindow::HandleDrop(HDROP drop) {
+  flutter::EncodableList paths;
+  const UINT count = ::DragQueryFileW(drop, 0xFFFFFFFF, nullptr, 0);
+  for (UINT index = 0; index < count; ++index) {
+    const UINT length = ::DragQueryFileW(drop, index, nullptr, 0);
+    if (length == 0) continue;
+    std::wstring path(static_cast<size_t>(length) + 1, L'\0');
+    const UINT copied = ::DragQueryFileW(drop, index, path.data(), length + 1);
+    path.resize(copied);
+    if (!IsAbsoluteFilesystemPath(path)) continue;
+    std::string utf8 = Utf8Path(path);
+    if (!utf8.empty()) paths.emplace_back(std::move(utf8));
+  }
+  // Release the OS drop handle even if Dart isn't initialized or paths are bad.
+  ::DragFinish(drop);
+  if (shell_ready_ && shell_channel_ && !paths.empty()) {
+    flutter::EncodableMap arguments;
+    arguments[flutter::EncodableValue("paths")] = flutter::EncodableValue(std::move(paths));
+    shell_channel_->InvokeMethod("filesDropped",
+        std::make_unique<flutter::EncodableValue>(std::move(arguments)));
+  }
+}
+
+LRESULT CALLBACK FlutterWindow::DropWindowProc(HWND window, UINT message,
+                                               WPARAM wparam, LPARAM lparam) {
+  auto* owner = reinterpret_cast<FlutterWindow*>(::GetPropW(window, kDropOwner));
+  if (!owner || !owner->drop_window_proc_) return ::DefWindowProcW(window, message, wparam, lparam);
+  if (message == WM_DROPFILES) {
+    owner->HandleDrop(reinterpret_cast<HDROP>(wparam));
+    return 0;
+  }
+  const WNDPROC previous = owner->drop_window_proc_;
+  if (message == WM_NCDESTROY) {
+    ::RemovePropW(window, kDropOwner);
+    owner->drop_window_ = nullptr;
+    owner->drop_window_proc_ = nullptr;
+  }
+  return ::CallWindowProcW(previous, window, message, wparam, lparam);
+}
+
 LRESULT
 FlutterWindow::MessageHandler(HWND hwnd, UINT const message,
                               WPARAM const wparam,
                               LPARAM const lparam) noexcept {
+  // Handle shell lifecycle before Flutter/plugins can consume these messages.
+  if (message == WM_CLOSE) {
+    if (background_mode_ && !quitting_) {
+      // Never hide without a usable route to restore the window.
+      if (tray_installed_ || InstallTrayIcon()) {
+        ::ShowWindow(hwnd, SW_HIDE);
+        return 0;
+      }
+    }
+    ::DestroyWindow(hwnd);
+    return 0;
+  }
+  if (message == WM_DROPFILES) {
+    HandleDrop(reinterpret_cast<HDROP>(wparam));
+    return 0;
+  }
+  if (message == kTaskbarCreated) {
+    tray_installed_ = false;
+    if (!InstallTrayIcon() && !::IsWindowVisible(hwnd)) ShowShellWindow();
+    return 0;
+  }
+  if (message == kTrayMessage) {
+    if (lparam == WM_LBUTTONDBLCLK) ShowShellWindow();
+    if (lparam == WM_RBUTTONUP || lparam == WM_CONTEXTMENU) ShowTrayMenu();
+    return 0;
+  }
   // Give Flutter, including plugins, an opportunity to handle window messages.
   if (flutter_controller_) {
     std::optional<LRESULT> result =

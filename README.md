@@ -1,39 +1,52 @@
 # LanDrop
 
-在电脑或手机上选择文件，生成同一局域网内可访问的下载网页和二维码。使用 Flutter/Dart 共用应用 UI、页面状态与 HTTP 服务逻辑，目标平台为 **macOS、Windows、Android、iOS**。手机下载页是离线自包含 HTML/CSS/JS 模板，具备响应式布局、轻量动画、暗色模式及减少动态效果适配。
+在 **macOS / Windows 电脑**上分享文件或文件夹，生成同一局域网内可访问的传输网页和二维码。手机使用浏览器下载、预览和上传，**无需安装手机 App**。桌面使用 Flutter/Dart，网页为不依赖 CDN 的自包含 HTML/CSS/JS。
 
 ## 使用方式
 
-1. 新建传输页面，填写名称，选择一个或多个文件。
-2. 连接同一个 Wi-Fi 的另一台设备扫码打开下载页，点击文件下载。
-3. 多个页面彼此独立，可分别停止、启动、重启和删除。删除页面不会删除原始文件。
-4. 手机网页的“上传至电脑”区域支持多文件选择、逐个上传和进度反馈；成功后电脑自动保存到下载目录下的 `LanDrop/<页面 ID>/`（不可用时回退到应用文档目录），应用显示接收记录与保存路径。macOS / Windows 的接收记录支持“打开接收文件夹”，以及针对单个文件的“在文件夹中显示”（打开 Finder / 资源管理器并选中文件），不会直接打开或运行该文件；被移动或删除时会提示。单文件最大 1 GiB；同名文件不会覆盖。停止或删除页面会中断进行中的上传，已接收文件保留，接收列表仅展示本次运行的记录。
-5. 移动平台选择的文件会复制到应用私有目录，确保重新打开仍可分享；请注意设备可用空间。电脑端直接读取原文件，移动或删除原文件后对应分享会失效。
+1. 新建传输页面，选择多个文件；也可点击“分享文件夹”或直接将文件、文件夹拖入窗口，选择新建页面或添加到已有页面。文件夹内部路径会保留，符号链接和空目录不加入。
+2. 手机连接同一 Wi-Fi，扫码打开传输页。可单独下载，或勾选多个文件打包成 ZIP。安全的图片、音频、视频类型可在网页内预览，实际格式支持取决于浏览器。
+3. 每个页面可独立启动、停止、重启和删除。电脑端读取原文件而不复制；移动、删除或修改原文件会影响分享。删除页面不删除电脑原文件或已接收文件。
+4. 手机选择文件后上传到电脑。每个文件最大 **1 GiB**，采用最高 4 MiB 的分块上传；断网后点击“继续上传”，刷新页面或换回网页后可重新选择原文件恢复。请保持手机网页打开；手机系统可能挂起后台浏览器，不能保证自动后台续传。
+5. “传输动态”显示收发字节、速度、预估剩余时间和取消操作。ZIP 准备阶段也可取消；准备时尚未开始发送，不显示虚构的网络进度。发送进度不等于对端已经写入磁盘。
+6. “接收记录”会持久保存文件名、路径、页面与时间，支持复制路径、打开接收文件夹、在 Finder / 资源管理器中选中文件。不会自动打开或运行收到的文件；移动、删除后会提示。
+7. 每个页面的“接收设置”可选择保存根目录、开启按日期整理。默认保存到下载目录下的 `LanDrop/<页面 ID>/`；开启日期整理时追加 `YYYY-MM-DD/`。设置只影响新建上传任务，旧文件和已开始的续传任务不会搬动。同名文件不会覆盖。
+8. 默认关闭主窗口后隐藏到 macOS 菜单栏 / Windows 系统托盘，传输继续。通过图标菜单可显示窗口或真正退出；“应用设置”可以关闭后台模式。电脑睡眠、断网或退出应用仍会中断连接。
 
-**安全提示：** 目前网页以局域网明文 HTTP 分享，没有密码或加密；任何能访问页面的局域网设备均可下载或向接收目录上传文件。不要直接打开、运行不可信来源上传的文件；接收服务仅保存文件，不自动执行。请仅在可信网络内分享非敏感文件。电脑防火墙可能需要放行应用入站连接；访客 Wi-Fi 的客户端隔离也可能阻断访问。
+## 续传与打包边界
 
-架构、双向传输协议和权限边界详见 [ARCHITECTURE.md](ARCHITECTURE.md)。
+- 单文件下载支持 HTTP Range、ETag / If-Range、Last-Modified；能否在下载界面恢复由浏览器或下载器决定。应用重新启动可能更换页面端口，需要重新扫码，不能保证旧下载链接继续有效。
+- ZIP 在工作 isolate 中流式生成到临时磁盘文件，保留相对路径并避免重名和路径穿越，支持 ZIP64；使用 STORE 不重复压缩视频等媒体。需要额外可用磁盘空间；每次请求重新生成，**ZIP 不支持断点续传**。
+- 分块上传会在断网、停止页面后保留未完成数据；重开页面并重新选择原文件可继续。网页“取消”、桌面“取消传输”或删除页面会清除对应未完成数据；已接收文件始终保留。
+- 未完成上传每页最多16项，防止无限创建临时会话。完成回执保留24小时（每页64条、总计256条），用于处理“电脑已保存，但确认响应丢失”的重试，不重复写入记录。
+- macOS 拖入时显示高亮；Windows 使用系统文件拖放消息接收文件，不提供拖入前的高亮。两端都有按钮作为文件夹选择的替代入口。
+- App 与网页的按钮、导航、状态、预览及进度有轻量动效，并跟随系统“减少动态效果”。
 
-## 构建跨端版
+**安全提示：** 网页目前是可信局域网内的明文 HTTP，没有密码或加密。任何能访问页面的局域网设备都可下载或上传文件。不要直接运行不可信来源的文件。服务端保留同源写请求校验、UUID 白名单、文件名净化及大小限制；HTML / SVG 等活动内容不会以内联预览方式提供。防火墙需允许入站连接，访客 Wi-Fi 的客户端隔离可能阻断访问。
 
-安装 [Flutter stable](https://docs.flutter.dev/get-started/install)，进入 `flutter_app`：
+架构和协议详见 [ARCHITECTURE](<ARCHITECTURE.md>)，本版验证与已知边界见 [1.2 验证记录](<RELEASE-1.2.md>)。
+
+## 构建桌面版
+
+安装 [Flutter stable](https://docs.flutter.dev/get-started/install)：
 
 ```bash
+cd flutter_app
 flutter pub get
+flutter analyze
+flutter test
 flutter run -d macos         # macOS
 flutter run -d windows       # Windows（在 Windows 上执行）
-flutter run -d android       # Android（需要 Android SDK）
-flutter run -d ios           # iOS（在 macOS 上，需 Xcode 与签名）
+flutter build macos --release -t lib/main.dart
+flutter build windows --release -t lib/main.dart
 ```
 
-发布构建：`flutter build macos --release`、`flutter build windows --release`、`flutter build apk --release`、`flutter build ios --release`。Android/iOS 真机安装需要各自的签名配置；iOS 的分发通常需要 Apple Developer 账号。首次联网时请允许本地网络权限，部分手机系统可能限制应用退到后台后的文件服务。
-
-macOS 构建后请使用 `bash tool/package_macos.sh` 打包。该脚本显式保留文件选择权限并验证最终签名；不要直接用不带 entitlements 的签名命令替换应用签名，否则原生文件选择器可能拒绝弹出。新建弹窗会显示选择器错误并支持重试。
+macOS 构建后使用 `bash tool/package_macos.sh` 打包，脚本保留文件选择权限并验证最终签名。不要用不带 entitlements 的签名命令替换，否则原生文件选择器可能拒绝弹出。
 
 ### 自动构建
 
-每次向 `master` 推送，GitHub Actions 的 `Build desktop apps` 工作流在 GitHub 托管的 macOS 和 Windows runner 上分别运行分析、测试、发布构建，并上传 `LanDrop-macOS.zip` / `LanDrop-Windows.zip` 到该次 Actions 运行的 Artifacts。也可手动触发。**这是可下载构建产物，不是已公证、已签名的正式安装包**；面向公众分发需要另行配置签名证书、macOS 公证或 Windows 代码签名。
+向 `master` 推送后，GitHub Actions 分别在 macOS / Windows 上分析、测试和构建，上传 `LanDrop-macOS.zip` / `LanDrop-Windows.zip` 到该次 Actions 的 Artifacts。**这些是构建产物，不是已公证的正式安装包**；公开分发需另行配置 macOS 公证或 Windows 代码签名。
 
-## 旧版 macOS 原生原型
+## 旧版原型
 
-仓库根目录的 Swift Package (`Sources/LanDrop`) 是最初的 macOS 原型，保留作参考；跨端版本以 `flutter_app` 为主。旧版依然可执行 `./build-app.sh` 构建 `dist/LanDrop.app`，但新功能优先在 Flutter 跨端版实现。
+根目录的 [Swift 源码](<Sources/LanDrop>) 是最初的 macOS 原型，仅供参考；当前版本以 [Flutter 工程](<flutter_app>) 为主。根目录构建脚本只构建旧原型，不包含本版功能。工程保留移动平台脚手架，但当前交付与后台/拖拽集成以 macOS / Windows 为准。
