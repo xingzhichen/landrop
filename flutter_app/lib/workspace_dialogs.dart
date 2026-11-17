@@ -40,8 +40,9 @@ class _ImportPathsDialogState extends State<ImportPathsDialog> {
                     crossAxisAlignment: CrossAxisAlignment.stretch,
                     children: [
                   Text('${widget.paths.length} 个项目；文件夹将保留内部文件的目录结构。',
-                      style:
-                          const TextStyle(color: AppTheme.muted, height: 1.6)),
+                      style: TextStyle(
+                          color: AppTheme.colorsOf(context).muted,
+                          height: 1.6)),
                   const SizedBox(height: 16),
                   for (final path in widget.paths.take(5))
                     Padding(
@@ -56,7 +57,7 @@ class _ImportPathsDialogState extends State<ImportPathsDialog> {
                     isExpanded: true,
                     decoration: const InputDecoration(labelText: '添加到'),
                     items: [
-                      const DropdownMenuItem(value: '', child: Text('新建传输页面')),
+                      const DropdownMenuItem(value: '', child: Text('新建传输')),
                       for (final page in widget.pages)
                         DropdownMenuItem(
                             value: page.id,
@@ -78,12 +79,14 @@ class _ImportPathsDialogState extends State<ImportPathsDialog> {
                                   maxLength: 80,
                                   onChanged: (_) => setState(() {}),
                                   decoration:
-                                      const InputDecoration(labelText: '页面名称')))
+                                      const InputDecoration(labelText: '传输名称')))
                           : const SizedBox.shrink()),
                   const SizedBox(height: 12),
-                  const Text('不会复制或删除电脑上的原文件。符号链接和空文件夹不加入分享。',
+                  Text('不会复制或删除电脑上的原文件。符号链接和空文件夹不加入分享。',
                       style: TextStyle(
-                          fontSize: 12, color: AppTheme.muted, height: 1.6)),
+                          fontSize: 12,
+                          color: AppTheme.colorsOf(context).muted,
+                          height: 1.6)),
                 ]))),
         actions: [
           ActionMotion(
@@ -103,7 +106,7 @@ class _ImportPathsDialogState extends State<ImportPathsDialog> {
                           Navigator.pop<DropChoice>(
                               context, (title: _title.text.trim(), page: page));
                         },
-                  child: Text(_pageId == null ? '创建并启动' : '添加到页面')))
+                  child: Text(_pageId == null ? '创建并启动' : '添加到传输')))
         ],
       );
 }
@@ -149,8 +152,9 @@ class _ReceiveOptionsDialogState extends State<ReceiveOptionsDialog> {
                     mainAxisSize: MainAxisSize.min,
                     crossAxisAlignment: CrossAxisAlignment.stretch,
                     children: [
-                  Text('页面：${widget.page.title}',
-                      style: const TextStyle(color: AppTheme.muted)),
+                  Text('传输：${widget.page.title}',
+                      style:
+                          TextStyle(color: AppTheme.colorsOf(context).muted)),
                   const SizedBox(height: 16),
                   const Text('保存位置',
                       style: TextStyle(fontWeight: FontWeight.w600)),
@@ -187,15 +191,17 @@ class _ReceiveOptionsDialogState extends State<ReceiveOptionsDialog> {
                       key: const ValueKey('organize-by-date'),
                       contentPadding: EdgeInsets.zero,
                       title: const Text('按接收日期整理'),
-                      subtitle: const Text('在页面目录内创建 YYYY-MM-DD 子文件夹。'),
+                      subtitle: const Text('在传输目录内创建 YYYY-MM-DD 子文件夹。'),
                       value: _dated,
                       onChanged: _picking
                           ? null
                           : (value) => setState(() => _dated = value)),
                   const SizedBox(height: 12),
-                  const Text('每个页面使用独立子文件夹。设置只影响之后新建的上传任务；已有文件不会搬动。',
+                  Text('每个传输使用独立子文件夹。设置只影响之后新建的上传任务；已有文件不会搬动。',
                       style: TextStyle(
-                          fontSize: 12, color: AppTheme.muted, height: 1.6)),
+                          fontSize: 12,
+                          color: AppTheme.colorsOf(context).muted,
+                          height: 1.6)),
                 ]))),
         actions: [
           ActionMotion(

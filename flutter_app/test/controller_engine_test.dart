@@ -1,3 +1,5 @@
+import 'dart:async';
+import 'dart:collection';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:isolate';
@@ -9,7 +11,31 @@ import 'package:landrop/zip_service.dart';
 import 'package:path/path.dart' as p;
 import 'package:shared_preferences/shared_preferences.dart';
 
-import 'controller_test.dart' show deleteTestDirectory, upload;
+import 'controller_test.dart' show LocalTestFile, deleteTestDirectory, upload;
+
+class CountingFiles extends ListBase<SharedFile> {
+  final List<SharedFile> _files = [];
+  int snapshots = 0;
+  Completer<void>? scanStarted;
+  @override
+  int get length => _files.length;
+  @override
+  set length(int value) => _files.length = value;
+  @override
+  SharedFile operator [](int index) => _files[index];
+  @override
+  void operator []=(int index, SharedFile file) => _files[index] = file;
+  @override
+  void add(SharedFile file) => _files.add(file);
+  @override
+  List<SharedFile> toList({bool growable = true}) {
+    snapshots++;
+    if (scanStarted != null && !scanStarted!.isCompleted) {
+      scanStarted!.complete();
+    }
+    return _files.toList(growable: growable);
+  }
+}
 
 class Reply {
   Reply(this.status, this.headers, this.bytes);
@@ -84,6 +110,333 @@ void main() {
     expect(result.json['offset'], 0);
     return result.json['id'] as String;
   }
+
+  test('empty named transfer accepts legacy and chunk phone uploads by page ID',
+      () async {
+    expect(page.files, isEmpty);
+    final empty = await request(port, 'GET', '/manifest');
+    expect(empty.status, 200);
+    expect(empty.json, {'title': 'Engine', 'files': []});
+    expect((await request(port, 'GET', '/')).status, 200);
+    final other = await controller.createPage(page.title);
+    await controller.start(other);
+    expect((await upload(port, 'phone.txt', 'phone')).$1, 201);
+    final id = await create(size: 0, name: 'empty.txt');
+    expect((await request(port, 'POST', '/uploads/$id/complete')).status, 201);
+    expect(controller.receivedFilesFor(page), hasLength(2));
+    expect(controller.receivedFilesFor(other), isEmpty);
+    expect(
+        controller.receivedFiles.every((file) => file.pageId == page.id), true);
+    expect((await upload(controller.portFor(other)!, 'phone.txt', 'other')).$1,
+        201);
+    expect(controller.receivedFilesFor(other).single.pageId, other.id);
+    final owned = controller.receivedFilesFor(page).first;
+    expect(ReceivedFile.fromJson(owned.toJson())!.pageId, page.id);
+    final legacy = Map<String, Object>.from(owned.toJson())..remove('pageId');
+    expect(ReceivedFile.fromJson(legacy)!.pageId, isNull);
+    page.title = 'Renamed';
+    expect(controller.receivedFilesFor(page), hasLength(2));
+    await controller.removePage(page);
+    final replacement = await controller.createPage('Engine');
+    expect(controller.receivedFilesFor(replacement), isEmpty);
+    expect(controller.receivedFilesFor(other), hasLength(1));
+    for (final item in controller.pages) {
+      await controller.stop(item);
+    }
+    controller.dispose();
+    controller = LanDropController(receiveDirectory: directory);
+    await controller.initialize();
+    final restoredOther = controller.pages.firstWhere((p) => p.id == other.id);
+    final restoredNew =
+        controller.pages.firstWhere((p) => p.id == replacement.id);
+    expect(controller.receivedFilesFor(restoredOther), hasLength(1));
+    expect(controller.receivedFilesFor(restoredNew), isEmpty);
+    expect(controller.receivedFiles.where((f) => f.pageId == page.id),
+        hasLength(2));
+  });
+
+  test('legacy history migrates once, ambiguous and orphan titles never rebind',
+      () async {
+    await controller.stop(page);
+    controller.dispose();
+    final unique = SharePage(id: newId(), title: 'Unique', files: []);
+    final duplicate = SharePage(id: newId(), title: 'Duplicate', files: []);
+    final duplicateTwo = SharePage(id: newId(), title: 'Duplicate', files: []);
+    Map<String, Object> legacy(String title) => ReceivedFile(
+            name: '$title.txt',
+            path: '/old/$title.txt',
+            size: 0,
+            pageTitle: title,
+            receivedAt: DateTime.utc(2025))
+        .toJson();
+    SharedPreferences.setMockInitialValues({
+      'landrop.pages.v1': jsonEncode(
+          [unique, duplicate, duplicateTwo].map((p) => p.toJson()).toList()),
+      'landrop.received.v1':
+          jsonEncode([legacy('Unique'), legacy('Duplicate'), legacy('Orphan')]),
+    });
+    controller = LanDropController(receiveDirectory: directory);
+    await controller.initialize();
+    final uniquePage = controller.pages.first;
+    expect(controller.receivedFilesFor(uniquePage).single.pageId, unique.id);
+    expect(controller.receivedFilesFor(controller.pages[1]), isEmpty);
+    expect(controller.receivedFilesFor(controller.pages[2]), isEmpty);
+    final persisted = jsonDecode((await SharedPreferences.getInstance())
+        .getString('landrop.received.v1')!) as List;
+    expect(persisted.first['pageId'], unique.id);
+    controller.dispose();
+    controller = LanDropController(receiveDirectory: directory);
+    await controller.initialize();
+    final migratedPage = controller.pages.first;
+    expect(controller.receivedFilesFor(migratedPage).single.pageId, unique.id);
+    await controller.removePage(migratedPage);
+    await controller.removePage(controller.pages.last);
+    final newUnique = await controller.createPage('Unique');
+    final newOrphan = await controller.createPage('Orphan');
+    expect(controller.receivedFilesFor(newUnique), isEmpty);
+    expect(controller.receivedFilesFor(newOrphan), isEmpty);
+    expect(controller.receivedFilesFor(controller.pages.first), isEmpty);
+    controller.dispose();
+    controller = LanDropController(receiveDirectory: directory);
+    await controller.initialize();
+    for (final current in controller.pages) {
+      expect(controller.receivedFilesFor(current), isEmpty);
+    }
+    expect(controller.receivedFiles, hasLength(3));
+  });
+
+  test('legacy title fallback requires a unique page and exact ID wins',
+      () async {
+    final legacy = ReceivedFile(
+        name: 'legacy.txt',
+        path: '/legacy',
+        size: 0,
+        pageTitle: page.title,
+        receivedAt: DateTime.utc(2025));
+    controller.receivedFiles.add(legacy);
+    expect(controller.receivedFilesFor(page), [legacy]);
+    final sameTitle = await controller.createPage(page.title);
+    expect(controller.receivedFilesFor(page), isEmpty);
+    expect(controller.receivedFilesFor(sameTitle), isEmpty);
+    controller.receivedFiles.add(ReceivedFile(
+        name: 'bound.txt',
+        path: '/bound',
+        size: 0,
+        pageTitle: page.title,
+        pageId: page.id,
+        receivedAt: DateTime.utc(2025)));
+    expect(controller.receivedFilesFor(page).single.name, 'bound.txt');
+    expect(controller.receivedFilesFor(sameTitle), isEmpty);
+  });
+
+  test(
+      'manifest caches per page, coalesces concurrent scans and invalidates edits',
+      () async {
+    final counted = CountingFiles();
+    final cachedPage =
+        SharePage(id: newId(), title: page.title, files: counted);
+    controller.pages.add(cachedPage);
+    final source = File(p.join(directory.path, 'cached.png'));
+    await source.writeAsString('old');
+    await controller.addPaths(cachedPage, [source.path]);
+    await controller.start(cachedPage);
+    final cachedPort = controller.portFor(cachedPage)!;
+    counted.snapshots = 0;
+    final first = await Future.wait(
+        List.generate(20, (_) => request(cachedPort, 'GET', '/manifest')));
+    expect(counted.snapshots, 1, reason: 'concurrent polls join one scan');
+    expect(first.every((r) => r.status == 200), true);
+    expect(first.map((r) => utf8.decode(r.bytes)).toSet(), hasLength(1));
+    expect((first.first.json['files'] as List).single['size'], 3);
+    await source.writeAsString('changed externally');
+    final repeated = await Future.wait(
+        List.generate(8, (_) => request(cachedPort, 'GET', '/manifest')));
+    expect(counted.snapshots, 1, reason: 'one-second cache avoids re-statting');
+    expect(repeated.every((r) => r.bytes.length == first.first.bytes.length),
+        true);
+    expect(repeated.first.bytes, first.first.bytes);
+    expect((await request(port, 'GET', '/manifest')).json['files'], isEmpty,
+        reason: 'same-title pages do not share caches');
+
+    final picked = File(p.join(directory.path, 'picked.txt'));
+    await picked.writeAsString('picker');
+    await controller
+        .addFiles(cachedPage, [LocalTestFile(picked, 'picked.txt')]);
+    final afterPicker = await request(cachedPort, 'GET', '/manifest');
+    expect(counted.snapshots, 2);
+    expect(afterPicker.json['files'], hasLength(2));
+    expect((afterPicker.json['files'] as List).first['size'], 18);
+    final extra = File(p.join(directory.path, 'added.txt'));
+    await extra.writeAsString('extra');
+    await controller.addPaths(cachedPage, [extra.path]);
+    expect((await request(cachedPort, 'GET', '/manifest')).json['files'],
+        hasLength(3));
+    expect(counted.snapshots, 3);
+    await controller.removeFile(cachedPage, counted.last);
+    final afterRemove = await request(cachedPort, 'GET', '/manifest');
+    expect(afterRemove.json['files'], hasLength(2));
+    expect(counted.snapshots, 4);
+    cachedPage.title = 'New title';
+    expect((await request(cachedPort, 'GET', '/manifest')).json['title'],
+        'New title');
+    expect(counted.snapshots, 5);
+
+    // Cache only metadata, never authorization. An externally replaced file
+    // must immediately fail actual download, even before the cache expires.
+    final cachedId = counted.first.id;
+    expect(source.absolute.path, p.join(directory.absolute.path, 'cached.png'));
+    await source.delete();
+    await Link(source.path).create(picked.path);
+    expect(picked.absolute.path, p.join(directory.absolute.path, 'picked.txt'));
+    await picked.delete();
+    expect((await request(cachedPort, 'HEAD', '/file/$cachedId')).status, 404);
+    expect((await request(cachedPort, 'GET', '/manifest')).json['files'],
+        hasLength(2));
+    await Future<void>.delayed(const Duration(milliseconds: 1100));
+    final expired = await Future.wait(
+        List.generate(12, (_) => request(cachedPort, 'GET', '/manifest')));
+    expect(expired.every((r) => (r.json['files'] as List).isEmpty), true);
+    expect(counted.snapshots, 6,
+        reason: 'TTL expiry also coalesces to one scan');
+    expect(controller.transfers, isEmpty);
+  });
+
+  test('file removal invalidates an already in-flight manifest scan', () async {
+    final files = CountingFiles();
+    final isolated = SharePage(id: newId(), title: 'Inflight', files: files);
+    controller.pages.add(isolated);
+    final source = File(p.join(directory.path, 'inflight.png'));
+    await source.writeAsString('image');
+    await controller.addPaths(isolated, [source.path]);
+    final removed = files.single;
+    await controller.start(isolated);
+    files.snapshots = 0;
+    files.scanStarted = Completer<void>();
+    final pending = request(controller.portFor(isolated)!, 'GET', '/manifest');
+    await files.scanStarted!.future;
+    await controller.removeFile(isolated, removed);
+    final response = await pending;
+    expect(response.status, 200);
+    expect(response.json['files'], isEmpty,
+        reason: 'old scan cannot publish a just-removed file');
+    expect(files.snapshots, 2,
+        reason: 'invalidated scan retries using the new revision');
+    expect(controller.transfers, isEmpty);
+  });
+
+  test('manifest is live, isolated, no-store and shares the inline whitelist',
+      () async {
+    final other = await controller.createPage('Other');
+    await controller.start(other);
+    for (final name in [
+      'PHOTO.PNG',
+      'song.mp3',
+      'clip.mp4',
+      'active.svg',
+      'active.html',
+      'notes.txt'
+    ]) {
+      final file = File(p.join(directory.path, name));
+      await file.writeAsString('content');
+      await controller.addPaths(page, [file.path]);
+    }
+    final tree = Directory(p.join(directory.path, 'nested'));
+    await tree.create();
+    await File(p.join(tree.path, 'image.jpg')).writeAsString('image');
+    await controller.addPaths(page, [tree.path]);
+    final privateFile = File(p.join(directory.path, 'private.txt'));
+    await privateFile.writeAsString('private');
+    await controller.addPaths(other, [privateFile.path]);
+    final valid = page.files.toList();
+    final missing = SharedFile(
+        id: newId(),
+        name: 'missing.png',
+        path: p.join(directory.path, 'missing'),
+        size: 1,
+        managed: false);
+    final link = Link(p.join(directory.path, 'link.png'));
+    await link.create(privateFile.path);
+    page.files.addAll([
+      missing,
+      SharedFile(
+          id: newId(),
+          name: 'link.png',
+          path: link.path,
+          size: 7,
+          managed: false),
+      SharedFile(
+          id: '../unsafe',
+          name: 'bad.png',
+          path: privateFile.path,
+          size: 7,
+          managed: false)
+    ]);
+    final manifest = await request(port, 'GET', '/manifest');
+    expect(manifest.status, 200);
+    expect(manifest.headers, contains('content-type: application/json'));
+    expect(manifest.headers, contains('cache-control: no-store'));
+    expect(manifest.headers, contains('x-content-type-options: nosniff'));
+    final files = manifest.json['files'] as List;
+    expect(files, hasLength(7));
+    expect(files.map((dynamic f) => f['previewKind']),
+        ['image', 'audio', 'video', null, null, null, 'image']);
+    expect(files.last['relativePath'], 'nested/image.jpg');
+    expect(utf8.decode(manifest.bytes), isNot(contains(directory.path)));
+    expect(files.every((dynamic f) => !(f as Map).containsKey('path')), true);
+    final head = await request(port, 'HEAD', '/manifest');
+    expect(head.status, 200);
+    expect(head.bytes, isEmpty);
+    expect(head.headers, contains('content-length: ${manifest.bytes.length}'));
+    expect(head.headers, contains('cache-control: no-store'));
+    expect((await request(port, 'POST', '/manifest')).status, 405);
+    expect((await request(port, 'GET', '/manifest/')).status, 404);
+    expect(controller.transfers, isEmpty);
+    final otherManifest =
+        await request(controller.portFor(other)!, 'GET', '/manifest');
+    expect((otherManifest.json['files'] as List).single['id'],
+        other.files.single.id);
+    expect(
+        (await request(port, 'GET', '/file/${other.files.single.id}')).status,
+        404);
+    expect(
+        (await request(
+                controller.portFor(other)!, 'GET', '/file/${valid.first.id}'))
+            .status,
+        404);
+    for (var i = 0; i < valid.length; i++) {
+      final inline =
+          await request(port, 'HEAD', '/file/${valid[i].id}?inline=1');
+      expect(inline.status, 200);
+      expect(
+          inline.headers,
+          contains(
+              'content-disposition: ${files[i]['previewKind'] == null ? 'attachment' : 'inline'};'));
+    }
+    expect(controller.transfers, isEmpty);
+    await controller.removeFile(page, valid.first);
+    page.title = 'Live title';
+    final changed = await request(port, 'GET', '/manifest');
+    expect(changed.json['title'], 'Live title');
+    expect(changed.json['files'], hasLength(6));
+    expect((await request(port, 'GET', '/file/${valid.first.id}')).status, 404);
+    await File(valid[1].path).writeAsString('new bytes');
+    // External FS edits are reflected when the short metadata cache expires.
+    await Future<void>.delayed(const Duration(milliseconds: 1100));
+    final resized = await request(port, 'GET', '/manifest');
+    expect((resized.json['files'] as List).first['size'], 9);
+    final added = File(p.join(directory.path, 'added.webp'));
+    await added.writeAsString('new image');
+    await controller.addPaths(page, [added.path]);
+    final expanded = await request(port, 'GET', '/manifest');
+    expect(expanded.json['files'], hasLength(7));
+    expect((expanded.json['files'] as List).last, {
+      'id': page.files.last.id,
+      'name': 'added.webp',
+      'size': 9,
+      'previewKind': 'image',
+    });
+    expect(controller.transfers, isEmpty);
+  });
 
   test('directory tree skips symlinks, JSON compatibility and safe ZIP names',
       () async {

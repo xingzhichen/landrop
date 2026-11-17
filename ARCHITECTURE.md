@@ -4,8 +4,8 @@
 
 主产品是 [Flutter 桌面工程](<flutter_app>)，面向 macOS / Windows。手机使用浏览器，无需安装 App。Dart `HttpServer` 在电脑上提供局域网文件服务，不依赖云服务、WebView 或 CDN。
 
-- [工作台](<flutter_app/lib/main.dart>)：页面管理、二维码、持久接收记录、拖拽导入、传输动态及应用设置。
-- [控制器](<flutter_app/lib/landrop_controller.dart>)：独立监听器、磁盘流、Range、会话/回执、任务取消及持久状态。
+- [工作台](<flutter_app/lib/main.dart>)：以命名传输为中心，二维码、分享文件、该传输的接收记录、拖拽导入及主题/应用设置均在对应位置。
+- [控制器](<flutter_app/lib/landrop_controller.dart>)：独立监听器、动态清单、磁盘流、Range、会话/回执、传输任务取消及持久状态。
 - [ZIP worker](<flutter_app/lib/zip_service.dart>)：工作 isolate 中使用磁盘流构建 STORE ZIP/ZIP64，避免大文件读入内存或阻塞 UI。
 - [网页模板](<flutter_app/lib/download_page.dart>)：转义后的真实文件列表、多选 ZIP、受限媒体预览、分块上传和可减弱动效；没有外部网络资源。
 - [桌面外壳](<flutter_app/lib/desktop_shell.dart>)：原生拖放、窗口显示、菜单栏/托盘、后台模式与退出。
@@ -17,7 +17,8 @@
 
 | 请求 | 作用 |
 |---|---|
-| `GET /` | 自包含传输网页 |
+| `GET /` | 自包含传输网页；标题与文件增删会自动刷新 |
+| `GET/HEAD /manifest` | 本传输的动态清单，无本地路径、同页缓存1秒、并发扫描合并 |
 | `GET/HEAD /file/<UUID>` | 白名单文件，支持单 Range、ETag、If-Range 和 Last-Modified |
 | `GET /file/<UUID>?inline=1` | 仅对受支持的安全媒体类型返回 inline，其余仍是 attachment |
 | `GET/HEAD /download.zip?ids=<UUID,UUID>` | 仅打包白名单条目，省略 ids 为全部；无 Range 续传 |
@@ -34,15 +35,18 @@
 
 ## 状态与文件生命周期
 
-- 页面、接收记录、未完成会话和有限完成回执使用 SharedPreferences 独立版本 key。
-- 文件夹递归只加入普通文件，跳过 symlink，记录 relativePath；ZIP 路径净化和唯一化，不接受客户端任意本地路径。
-- 接收根目录默认 Downloads/LanDrop，回退应用文档目录；可按页面覆盖，并追加页面UUID及可选日期目录。子目录不得是链接。
+- 命名传输、带归属 ID 的接收记录、未完成会话和有限完成回执使用 SharedPreferences 独立版本 key；迁移旧记录时只会归入唯一匹配的旧传输。
+- 文件夹递归只加入普通文件，跳过 symlink，记录 relativePath；ZIP 路径净化和唯一化，不接受客户端任意本地路径。网页 GET /manifest 只枚举本传输 ID 白名单内的文件，不泄露本机 path；每传输清单1秒去重/合并，变更即时失效并有界并行检查。
+- 接收根目录默认 Downloads/LanDrop，回退应用文档目录；可按传输覆盖，并追加传输UUID及可选日期目录。子目录不得是链接。
 - 收到文件先写随机 `.part`，完整后独占保留不重名目标，再提交文件与记录。后续目录设置不搬动已有会话的目标。
 - 原始旧版上传断开后清理 partial。分块上传断网/stop 后保留可恢复数据；cancel/removePage 清理 partial，不删除已收文件。每页最多16个未完成会话。
 - 完成回执24小时过期，每页最多64条、总计256条，只含 id/pageId/name/size/time，不含路径。complete 响应丢失后可重试确认，不重复保存；新建上传仍允许用户主动重传同一文件。
-- 活跃传输列表来自真实字节流，UI 仅做短时插值反馈；任务速度/ETA是估算，不是对端保存证明。完成任务面板仅显示最近30项，接收历史独立持久化。
+- 真实收发 task 仍供传输/取消协议使用，但不再设独立的全局「传输动态」界面；当前工作台按传输呈现分享清单和本传输的接收历史。发送进度不代表对端保存证明。
 
-## 原生桌面生命周期
+## 主题与原生桌面生命周期
+
+App 提供 system/light/dark 三种偏好。默认保存 `ThemeMode.system`，由操作系统亮度动态驱动，不把当前系统亮度固化为用户浅/深选择；手动切换浅色/深色时持久化偏好。网页原生使用 `prefers-color-scheme` 自动匹配。
+
 
 macOS 使用 AppKit 状态栏及窗口隐藏，Windows 使用通知区域图标与 WM_DROPFILES；关闭主窗默认不释放 Flutter engine。显式退出才终止服务；后台模式可关闭并持久保存。Windows 也给 Flutter 子 HWND 注册拖放，处理 Explorer 重启后的托盘恢复。Mac 支持 drag-enter/leave 高亮，Windows WM_DROPFILES 不提供该前置反馈。
 

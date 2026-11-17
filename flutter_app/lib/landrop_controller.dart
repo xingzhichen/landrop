@@ -142,8 +142,10 @@ class ReceivedFile {
     required this.size,
     required this.pageTitle,
     required this.receivedAt,
+    this.pageId,
   });
 
+  final String? pageId;
   final String name;
   final String path;
   final int size;
@@ -154,6 +156,7 @@ class ReceivedFile {
         'path': path,
         'size': size,
         'pageTitle': pageTitle,
+        if (pageId != null) 'pageId': pageId!,
         'receivedAt': receivedAt.toIso8601String()
       };
   static ReceivedFile? fromJson(Object? value) {
@@ -173,6 +176,7 @@ class ReceivedFile {
         path: value['path'] as String,
         size: value['size'] as int,
         pageTitle: value['pageTitle'] as String,
+        pageId: value['pageId'] is String ? value['pageId'] as String : null,
         receivedAt: date);
   }
 }
@@ -272,6 +276,14 @@ class _UploadCancelled implements Exception {}
 
 class _UploadTooLarge implements Exception {}
 
+/// A path-free HTTP representation; concurrent polls share the same future.
+class _ManifestSnapshot {
+  _ManifestSnapshot(this.title, this.bytes);
+  final String title;
+  final Future<List<int>> bytes;
+  DateTime? completedAt;
+}
+
 /// Owns each page's independent listener, persisted state, and mobile file copies.
 class LanDropController extends ChangeNotifier {
   /// Tests can supply a base directory without invoking path_provider.
@@ -280,6 +292,9 @@ class LanDropController extends ChangeNotifier {
 
   static const _storageKey = 'landrop.pages.v1';
   static const _recordsKey = 'landrop.received.v1';
+  static const _recordsMigratedKey = 'landrop.received.pageIdsMigrated.v1';
+  // Unmatched/ambiguous legacy records remain history, never future ownership.
+  final Set<ReceivedFile> _unassignedLegacyRecords = {};
   static const _sessionsKey = 'landrop.sessions.v1';
   static const _receiptsKey = 'landrop.uploadReceipts.v1';
   static const _receiptLifetime = Duration(hours: 24);
@@ -288,6 +303,8 @@ class LanDropController extends ChangeNotifier {
   final Map<String, Future<void> Function()> _cancelActions = {};
   final Map<String, _Session> _sessions = {};
   final Map<String, Set<Future<void>>> _requests = {};
+  static const _manifestLifetime = Duration(seconds: 1);
+  final Map<String, _ManifestSnapshot> _manifests = {};
   Future<void> _persistQueue = Future.value();
   static const _maxUploadBytes = 1024 * 1024 * 1024;
   final Directory? _receiveBaseDirectory;
@@ -303,6 +320,43 @@ class LanDropController extends ChangeNotifier {
 
   bool get isMobile => Platform.isAndroid || Platform.isIOS;
   int? portFor(SharePage page) => _servers[page.id]?.port;
+
+  /// ID ownership wins even after renames. A legacy title is safe only when
+  /// exactly one current page has it, and migration has not left it unassigned.
+  List<ReceivedFile> receivedFilesFor(SharePage page) {
+    if (!pages.any((candidate) => candidate.id == page.id)) return [];
+    final uniqueTitle =
+        pages.where((candidate) => candidate.title == page.title).length == 1;
+    return receivedFiles.where((file) {
+      if (file.pageId != null) return file.pageId == page.id;
+      return uniqueTitle &&
+          file.pageTitle == page.title &&
+          !_unassignedLegacyRecords.contains(file);
+    }).toList();
+  }
+
+  void _migrateLegacyRecords({required bool alreadyMigrated}) {
+    for (var index = 0; index < receivedFiles.length; index++) {
+      final record = receivedFiles[index];
+      if (record.pageId != null || _unassignedLegacyRecords.contains(record)) {
+        continue;
+      }
+      final matches =
+          pages.where((page) => page.title == record.pageTitle).toList();
+      if (!alreadyMigrated && matches.length == 1) {
+        receivedFiles[index] = ReceivedFile(
+          name: record.name,
+          path: record.path,
+          size: record.size,
+          pageTitle: record.pageTitle,
+          pageId: matches.single.id,
+          receivedAt: record.receivedAt,
+        );
+      } else {
+        _unassignedLegacyRecords.add(record);
+      }
+    }
+  }
 
   Future<void> initialize() async {
     _preferences = await SharedPreferences.getInstance();
@@ -426,6 +480,7 @@ class LanDropController extends ChangeNotifier {
           managed: managed,
         ),
       );
+      _manifests.remove(page.id);
       await _persist();
       notifyListeners();
     }
@@ -433,6 +488,7 @@ class LanDropController extends ChangeNotifier {
 
   Future<void> removeFile(SharePage page, SharedFile file) async {
     page.files.removeWhere((candidate) => candidate.id == file.id);
+    _manifests.remove(page.id);
     await _persist();
     notifyListeners();
     await _deleteManagedFile(file);
@@ -445,7 +501,10 @@ class LanDropController extends ChangeNotifier {
       await _deleteSession(session);
     }
     _receipts.removeWhere((_, receipt) => receipt.pageId == page.id);
+    // Resolve any in-memory legacy entries before removing their only owner.
+    _migrateLegacyRecords(alreadyMigrated: false);
     pages.removeWhere((candidate) => candidate.id == page.id);
+    _manifests.remove(page.id);
     pageErrors.remove(page.id);
     await _persist();
     notifyListeners();
@@ -730,6 +789,7 @@ class LanDropController extends ChangeNotifier {
         path: destination.path,
         size: size,
         pageTitle: page.title,
+        pageId: page.id,
         receivedAt: DateTime.now(),
       );
       receivedFiles.insert(0, pendingRecord);
@@ -789,6 +849,78 @@ class LanDropController extends ChangeNotifier {
     }
   }
 
+  Future<List<int>> _manifestFor(SharePage page) async {
+    while (true) {
+      var snapshot = _manifests[page.id];
+      final now = DateTime.now();
+      if (snapshot == null ||
+          snapshot.title != page.title ||
+          (snapshot.completedAt != null &&
+              now.difference(snapshot.completedAt!) >= _manifestLifetime)) {
+        snapshot = _ManifestSnapshot(
+            page.title, _scanManifest(page.title, page.files.toList()));
+        _manifests[page.id] = snapshot;
+      }
+      try {
+        final bytes = await snapshot.bytes;
+        snapshot.completedAt ??= DateTime.now();
+        // Mutations invalidate even an in-flight scan: never publish its stale
+        // result over a newer revision. Concurrent readers join the new scan.
+        if (!identical(_manifests[page.id], snapshot) ||
+            snapshot.title != page.title) {
+          continue;
+        }
+        return bytes;
+      } catch (_) {
+        if (identical(_manifests[page.id], snapshot)) {
+          _manifests.remove(page.id);
+        }
+        rethrow;
+      }
+    }
+  }
+
+  Future<List<int>> _scanManifest(
+      String title, List<SharedFile> snapshot) async {
+    final ids = <String>{};
+    final files = snapshot
+        .where((file) => _uuidPattern.hasMatch(file.id) && ids.add(file.id))
+        .toList();
+    final entries = List<Map<String, Object?>?>.filled(files.length, null);
+    var next = 0;
+    // Bound async FS concurrency, keeping the original list order. A scan is
+    // O(n), shared by all phones for one second; only JSON bytes are cached.
+    await Future.wait(List.generate(min(16, files.length), (_) async {
+      while (next < files.length) {
+        final index = next++;
+        final file = files[index];
+        try {
+          if (await FileSystemEntity.type(file.path, followLinks: false) !=
+              FileSystemEntityType.file) {
+            continue;
+          }
+          final stat = await File(file.path).stat();
+          if (stat.type != FileSystemEntityType.file) continue;
+          final mime = _previewMime(_downloadName(file.name));
+          entries[index] = {
+            'id': file.id,
+            'name': file.name,
+            'size': stat.size,
+            if (file.relativePath != null && _zipName(file) != null)
+              'relativePath': file.relativePath,
+            'previewKind': mime?.split('/').first,
+          };
+        } on FileSystemException {
+          // Missing/unreadable shares are not part of this snapshot.
+        }
+      }
+    }));
+    return utf8.encode(jsonEncode({
+      'title': title,
+      'files': entries.whereType<Map<String, Object?>>().toList(),
+    }));
+  }
+
   Future<void> _serve(SharePage page, HttpRequest request) async {
     final response = request.response;
     response.headers.set('X-Content-Type-Options', 'nosniff');
@@ -815,6 +947,14 @@ class LanDropController extends ChangeNotifier {
       if (request.method != 'GET' && request.method != 'HEAD') {
         response.statusCode = HttpStatus.methodNotAllowed;
         response.headers.set('Allow', 'GET, HEAD');
+        await response.close();
+        return;
+      }
+      if (request.uri.path == '/manifest') {
+        final data = await _manifestFor(page);
+        response.headers.contentType = ContentType.json;
+        response.contentLength = data.length;
+        if (request.method == 'GET') response.add(data);
         await response.close();
         return;
       }
@@ -873,9 +1013,7 @@ class LanDropController extends ChangeNotifier {
       response.headers.set(HttpHeaders.etagHeader, etag);
       response.headers
           .set(HttpHeaders.lastModifiedHeader, HttpDate.format(modified));
-      final safeName =
-          selected.name.replaceAll(RegExp(r'[\x00-\x1f\x7f/\\]'), '_').trim();
-      final name = safeName.isEmpty ? 'download' : safeName;
+      final name = _downloadName(selected.name);
       final fallback = name
           .replaceAll(RegExp(r'[^\x20-\x7e]'), '_')
           .replaceAll(RegExp(r'["\\;]'), '_');
@@ -1095,6 +1233,7 @@ class LanDropController extends ChangeNotifier {
             size: await File(stored).length(),
             managed: isMobile,
             relativePath: relative));
+        _manifests.remove(page.id);
       }
     }
 
@@ -1188,6 +1327,8 @@ class LanDropController extends ChangeNotifier {
     } on FormatException {
       /* Ignore malformed records, not the rest of startup. */
     }
+    _migrateLegacyRecords(
+        alreadyMigrated: _preferences!.getBool(_recordsMigratedKey) == true);
     try {
       final sessions =
           jsonDecode(_preferences!.getString(_sessionsKey) ?? '[]');
@@ -1469,6 +1610,7 @@ class LanDropController extends ChangeNotifier {
             path: destination.path,
             size: session.size,
             pageTitle: page.title,
+            pageId: page.id,
             receivedAt: DateTime.now());
         receivedFiles.insert(0, record);
         _sessions.remove(session.id);
@@ -1617,6 +1759,11 @@ class LanDropController extends ChangeNotifier {
     } else {
       await _closeAfterError(request.response, status);
     }
+  }
+
+  String _downloadName(String name) {
+    final safe = name.replaceAll(RegExp(r'[\x00-\x1f\x7f/\\]'), '_').trim();
+    return safe.isEmpty ? 'download' : safe;
   }
 
   String? _previewMime(String name) {
@@ -1831,7 +1978,8 @@ class LanDropController extends ChangeNotifier {
       if (!await _preferences!.setString(_storageKey, pagesJson) ||
           !await _preferences!.setString(_recordsKey, recordsJson) ||
           !await _preferences!.setString(_sessionsKey, sessionsJson) ||
-          !await _preferences!.setString(_receiptsKey, receiptsJson)) {
+          !await _preferences!.setString(_receiptsKey, receiptsJson) ||
+          !await _preferences!.setBool(_recordsMigratedKey, true)) {
         throw const FileSystemException('Could not persist transfer state');
       }
     });

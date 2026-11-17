@@ -74,6 +74,7 @@ String _formatSize(int bytes) {
     'heic',
     'svg',
     'avif',
+    'bmp',
   ].contains(ext)) {
     return (label: '图片', kind: 'image', icon: _imageIcon);
   }
@@ -337,15 +338,15 @@ dialog::backdrop{background:rgba(10,16,30,.65)}
      Voice: technical-dry, plain Chinese actions; no unverified connection claims. -->
 <header class="topbar"><div class="wrap topbar-inner"><a class="skip-link" href="#top">跳转到文件传输</a><div class="brand" aria-label="LanDrop">Lan<span>Drop</span></div><span class="brand-context">局域网文件传输</span><button class="theme-toggle" id="theme-toggle" type="button" aria-label="切换深色模式" aria-pressed="false"><svg class="moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20.5 14.4A9 9 0 0 1 9.6 3.5 9 9 0 1 0 20.5 14.4Z"/></svg><svg class="sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2m0 16v2M4.9 4.9l1.4 1.4m11.4 11.4 1.4 1.4M2 12h2m16 0h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg></button></div></header>
 <main class="page wrap" id="top">
-<section class="hero" data-enter aria-labelledby="page-title"><div class="hero-text"><p class="eyebrow">电脑分享的文件</p><h1 id="page-title">$safeTitle</h1><p class="hero-copy">下载到当前设备，或把文件上传至电脑。</p></div><div class="stats" aria-label="分享文件统计"><div class="stat"><strong>$count</strong> 个文件</div><div class="stat">总计 <strong>${_formatSize(totalBytes)}</strong></div></div></section>
+<section class="hero" data-enter aria-labelledby="page-title"><div class="hero-text"><p class="eyebrow">电脑分享的文件</p><h1 id="page-title">$safeTitle</h1><p class="hero-copy">下载到当前设备，也可向此传输上传文件。</p></div><div class="stats" aria-label="分享文件统计"><div class="stat"><strong id="file-count">$count</strong> 个文件</div><div class="stat">总计 <strong id="file-total">${_formatSize(totalBytes)}</strong></div></div></section>
 <div class="workspace">
 <section class="download-panel" aria-labelledby="download-heading"><div class="section-heading"><h2 id="download-heading">下载文件</h2><span>无需安装 App</span></div>
 <div class="selection-bar"><label><input id="select-all" type="checkbox" aria-label="全选文件"> 全选</label><span id="selection-count" role="status" aria-live="polite">已选 0 个</span><a class="action" id="zip-download" href="/download.zip" download>下载全部 ZIP</a></div>
-<div class="file-list" aria-label="可下载文件">
+<div class="file-list" id="file-list" aria-label="可下载文件">
 ''');
   if (available.isEmpty) {
     html.write(
-        '''<div class="empty"><span class="empty-mark" aria-hidden="true">FILE</span><p>暂无可下载的文件</p><p>请在电脑上添加要分享的文件。</p></div>\n''');
+        '''<div class="empty" id="file-empty"><span class="empty-mark" aria-hidden="true">FILE</span><p>暂无可下载的文件</p><p>请在电脑上添加要分享的文件。</p></div>\n''');
   }
   for (var i = 0; i < available.length; i++) {
     final file = available[i];
@@ -361,18 +362,18 @@ dialog::backdrop{background:rgba(10,16,30,.65)}
     final dot = file.name.lastIndexOf('.');
     final ext = dot < 0 ? '' : file.name.substring(dot + 1).toLowerCase();
     final previewKind =
-        ['jpg', 'jpeg', 'png', 'gif', 'webp', 'avif'].contains(ext)
+        ['jpg', 'jpeg', 'png', 'gif', 'webp', 'avif', 'bmp'].contains(ext)
             ? 'image'
             : ['mp4', 'webm', 'mov'].contains(ext)
                 ? 'video'
-                : ['mp3', 'wav', 'ogg', 'm4a'].contains(ext)
+                : ['mp3', 'wav', 'ogg', 'm4a', 'aac', 'flac'].contains(ext)
                     ? 'audio'
                     : null;
     final previewHtml = previewKind == null
         ? ''
         : '<button class="action preview-button" type="button" data-id="$safeId" data-kind="$previewKind" data-name="$safeName">预览</button>';
     html.write(
-      '''<div class="file-card kind-${type.kind}"><input id="select-$safeId" class="file-select" type="checkbox" value="$safeId" aria-label="选择 $safeName">
+      '''<div class="file-card kind-${type.kind}" data-file-id="$safeId" data-name="$safeName" data-size="${file.size < 0 ? 0 : file.size}" data-path="${_escapeHtml(path ?? '')}" data-preview-kind="${previewKind ?? ''}"><input id="select-$safeId" class="file-select" type="checkbox" value="$safeId" aria-label="选择 $safeName">
 <span class="file-icon" aria-hidden="true">${type.icon}</span><span class="file-info"><label class="file-name" for="select-$safeId">$safeName</label>$pathHtml<span class="file-meta"><span class="file-kind">${type.label}</span><span>$size</span></span></span><div class="file-actions">$previewHtml<a class="download-arrow" href="/file/$safeId" download="$safeName" aria-label="下载 $safeName">下载</a></div></div>\n''',
     );
   }
@@ -385,7 +386,7 @@ dialog::backdrop{background:rgba(10,16,30,.65)}
 <div class="upload-controls"><div><label class="picker-label" for="upload-files">选择上传文件</label><input class="upload-picker" id="upload-files" type="file" multiple aria-label="选择上传到电脑的文件" aria-describedby="upload-help"><p class="upload-limit" id="upload-limit">支持多选 · 单文件最大 1 GiB</p></div><button class="upload-button" id="upload-button" type="button" disabled>上传到电脑</button></div>
 <p class="upload-summary" id="upload-summary" role="status" aria-live="polite">选择文件后，点击上传到电脑。</p>
 <ul class="upload-list" id="upload-list" aria-label="上传文件及进度"></ul>
-<details class="upload-details"><summary>上传限制与保存说明</summary><p class="upload-help" id="upload-help">可多选文件，按顺序逐个上传，单文件最大 1 GiB（1,073,741,824 字节）。上传成功后文件会自动保存到电脑的接收目录，无需在电脑上逐个确认；请以每个文件的成功或失败反馈为准。网络中断可点击「继续上传」。刷新或重新打开页面后，需重新选择原文件续传，浏览器不会自动保留文件访问权限。请保持电脑上的分享页面不变。</p></details>
+<details class="upload-details"><summary>上传限制与保存说明</summary><p class="upload-help" id="upload-help">可多选文件，按顺序逐个上传，单文件最大 1 GiB（1,073,741,824 字节）。上传成功后文件会自动保存到电脑的接收目录，无需在电脑上逐个确认；请以每个文件的成功或失败反馈为准。网络中断可点击「继续上传」。刷新或重新打开页面后，需重新选择原文件续传，浏览器不会自动保留文件访问权限。上传文件归属于当前传输。</p></details>
 <noscript><p class="upload-help">上传功能需要启用 JavaScript；文件下载仍可直接使用。</p></noscript>
 </section><p class="network-note"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true"><path d="M2 8a16 16 0 0 1 20 0M5 12a11 11 0 0 1 14 0M8.5 16a5.5 5.5 0 0 1 7 0"/><circle cx="12" cy="20" r="1" fill="currentColor" stroke="none"/></svg><span><strong>请连接同一 Wi-Fi</strong><br>传输时请保持电脑上的 LanDrop 和本页面打开。</span></p></aside>
 </div><footer class="footer"><span>LanDrop · 局域网文件传输</span><span>文件通过此电脑的本地服务传输</span></footer></main>
@@ -398,15 +399,22 @@ dialog::backdrop{background:rgba(10,16,30,.65)}
   var toggle = document.getElementById('theme-toggle');
   var toast = document.getElementById('download-toast');
   var timer;
-  var dark = false;
-  toggle.setAttribute('aria-pressed', String(!!dark));
-  toggle.setAttribute('aria-label', dark ? '切换浅色模式' : '切换深色模式');
-  toggle.addEventListener('click', function () {
-    dark = !dark;
+  var systemTheme = window.matchMedia ? window.matchMedia('(prefers-color-scheme: dark)') : null;
+  var manualTheme = false, dark = !!(systemTheme && systemTheme.matches);
+  function applyTheme() {
     root.classList.toggle('theme-dark', dark);
     root.classList.toggle('theme-light', !dark);
     toggle.setAttribute('aria-pressed', String(dark));
     toggle.setAttribute('aria-label', dark ? '切换浅色模式' : '切换深色模式');
+  }
+  applyTheme();
+  function followTheme(event) { if (!manualTheme) { dark = event.matches; applyTheme(); } }
+  if (systemTheme) {
+    if (systemTheme.addEventListener) systemTheme.addEventListener('change', followTheme);
+    else if (systemTheme.addListener) systemTheme.addListener(followTheme);
+  }
+  toggle.addEventListener('click', function () {
+    manualTheme = true; dark = !dark; applyTheme();
   });
   function notify(message) {
     toast.textContent = message;
@@ -419,6 +427,8 @@ dialog::backdrop{background:rgba(10,16,30,.65)}
   var zip = document.getElementById('zip-download');
   function selection() {
     var selected = checks.filter(function (c) { return c.checked; });
+    all.disabled = checks.length === 0;
+    zip.hidden = checks.length === 0;
     all.checked = checks.length > 0 && selected.length === checks.length;
     all.indeterminate = selected.length > 0 && !all.checked;
     var counter = document.getElementById('selection-count');
@@ -431,6 +441,7 @@ dialog::backdrop{background:rgba(10,16,30,.65)}
     zip.textContent = selected.length ? '打包下载所选' : '下载全部 ZIP';
   }
   all.disabled = checks.length === 0;
+  zip.hidden = checks.length === 0;
   all.addEventListener('change', function () { checks.forEach(function (c) { c.checked = all.checked; }); selection(); });
   checks.forEach(function (c) { c.addEventListener('change', selection); });
   document.querySelectorAll('.download-arrow, #zip-download').forEach(function (link) {
@@ -445,8 +456,9 @@ dialog::backdrop{background:rgba(10,16,30,.65)}
   }
   var dialog = document.getElementById('preview-dialog');
   var mediaBox = document.getElementById('preview-media');
-  var opener, media, closing = false, closeTimer;
+  var opener, media, previewId, closing = false, closeTimer;
   function stopMedia() {
+    previewId = null;
     if (!media) return;
     if (media.pause) media.pause();
     media.removeAttribute('src');
@@ -460,17 +472,18 @@ dialog::backdrop{background:rgba(10,16,30,.65)}
     stopMedia();
     dialog.classList.remove('visible');
     var reduced = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
-    closeTimer = window.setTimeout(function () { dialog.close(); closing = false; if (opener) opener.focus(); }, reduced ? 0 : 160);
+    closeTimer = window.setTimeout(function () { dialog.close(); closing = false; if (opener && opener.isConnected !== false) opener.focus(); }, reduced ? 0 : 160);
   }
   document.getElementById('preview-close').addEventListener('click', closePreview);
   dialog.addEventListener('cancel', function (event) { event.preventDefault(); closePreview(); });
-  dialog.addEventListener('close', function () { stopMedia(); if (opener) opener.focus(); });
-  document.querySelectorAll('.preview-button').forEach(function (button) {
+  dialog.addEventListener('close', function () { stopMedia(); if (opener && opener.isConnected !== false) opener.focus(); });
+  function bindPreview(button) {
     button.addEventListener('click', function () {
       var kind = button.getAttribute('data-kind'), id = button.getAttribute('data-id');
       if (!uuid(id) || !['image', 'video', 'audio'].includes(kind) || closing) return;
       opener = button;
       stopMedia();
+      previewId = id;
       document.getElementById('preview-title').textContent = button.getAttribute('data-name');
       media = document.createElement(kind === 'image' ? 'img' : kind);
       if (kind === 'image') media.alt = button.getAttribute('data-name');
@@ -481,7 +494,151 @@ dialog::backdrop{background:rgba(10,16,30,.65)}
       window.requestAnimationFrame(function () { dialog.classList.add('visible'); });
       document.getElementById('preview-close').focus();
     });
+  }
+  document.querySelectorAll('.preview-button').forEach(bindPreview);
+  // Keep each UUID's row and controls alive; polling never touches upload DOM.
+  var fileList = document.getElementById('file-list'), records = new Map();
+  function category(name) {
+    var ext = name.includes('.') ? name.split('.').pop().toLowerCase() : '';
+    var types = [
+      ['image','图片','IMG',['jpg','jpeg','png','gif','webp','heic','svg','avif','bmp']],
+      ['video','视频','VID',['mp4','mov','m4v','avi','mkv','webm']],
+      ['audio','音频','AUD',['mp3','m4a','aac','wav','flac','ogg']],
+      ['archive','压缩包','ZIP',['zip','rar','7z','tar','gz','bz2']],
+      ['document','文档','DOC',['pdf','doc','docx','txt','md','rtf','pages']],
+      ['sheet','表格','XLS',['xls','xlsx','csv','numbers']]
+    ];
+    return types.find(function (t) { return t[3].includes(ext); }) || ['other','文件','FILE'];
+  }
+  function safePreview(name, kind) {
+    var extensions = {image:['jpg','jpeg','png','gif','webp','avif','bmp'],video:['mp4','webm','mov'],audio:['mp3','wav','ogg','m4a','aac','flac']};
+    return typeof kind === 'string' && Object.prototype.hasOwnProperty.call(extensions, kind) && name.includes('.') && extensions[kind].includes(name.split('.').pop().toLowerCase()) ? kind : null;
+  }
+  function sizeLabel(bytes) {
+    var units = ['B','KB','MB','GB','TB','PB','EB'], n = bytes, i = 0;
+    while (n >= 1024 && i < units.length-1) { n /= 1024; i++; }
+    return (i ? String(Number(n.toFixed(n >= 100 ? 0 : 1))) : String(n)) + ' ' + units[i];
+  }
+  function element(tag, className, parent) {
+    var node = document.createElement(tag); node.className = className;
+    if (parent) parent.appendChild(node);
+    return node;
+  }
+  function record(row, data) {
+    return {row:row, data:data, check:row.querySelector('.file-select'), icon:row.querySelector('.file-icon'),
+      name:row.querySelector('.file-name'), path:row.querySelector('.file-path'), info:row.querySelector('.file-info'),
+      kind:row.querySelector('.file-kind'), size:row.querySelector('.file-meta').lastElementChild,
+      actions:row.querySelector('.file-actions'), preview:row.querySelector('.preview-button'), download:row.querySelector('.download-arrow')};
+  }
+  document.querySelectorAll('.file-card').forEach(function (row) {
+    var data = {id:row.getAttribute('data-file-id'), name:row.getAttribute('data-name'), size:Number(row.getAttribute('data-size')),
+      relativePath:row.getAttribute('data-path') || '', previewKind:row.getAttribute('data-preview-kind') || null};
+    records.set(data.id, record(row, data));
   });
+  function createRecord(data) {
+    var row = element('div','file-card');
+    var check = element('input','file-select',row); check.type = 'checkbox'; check.value = data.id; check.id = 'select-' + data.id;
+    check.addEventListener('change',selection);
+    element('span','file-icon',row).setAttribute('aria-hidden','true');
+    var info = element('span','file-info',row), name = element('label','file-name',info); name.setAttribute('for',check.id);
+    var meta = element('span','file-meta',info); element('span','file-kind',meta); element('span','file-size',meta);
+    var actions = element('div','file-actions',row), link = element('a','download-arrow',actions);
+    link.href = '/file/' + data.id; link.textContent = '下载';
+    link.addEventListener('click',function () { notify('已请求下载，请查看浏览器下载列表。'); });
+    return record(row, null);
+  }
+  function patch(r, data) {
+    if (JSON.stringify(r.data) === JSON.stringify(data)) return;
+    var type = category(data.name);
+    r.row.className = 'file-card kind-' + type[0];
+    r.check.setAttribute('aria-label','选择 ' + data.name);
+    r.icon.textContent = type[2]; r.name.textContent = data.name; r.kind.textContent = type[1]; r.size.textContent = sizeLabel(data.size);
+    if (data.relativePath) {
+      if (!r.path) { r.path = element('span','file-path'); r.info.insertBefore(r.path,r.kind.parentElement); }
+      r.path.textContent = data.relativePath;
+    } else if (r.path) { r.path.remove(); r.path = null; }
+    r.download.setAttribute('download',data.name); r.download.setAttribute('aria-label','下载 ' + data.name);
+    if (data.previewKind) {
+      if (!r.preview) { r.preview = element('button','action preview-button'); r.preview.type = 'button'; r.preview.textContent = '预览'; r.actions.insertBefore(r.preview,r.download); bindPreview(r.preview); }
+      r.preview.setAttribute('data-id',data.id); r.preview.setAttribute('data-kind',data.previewKind); r.preview.setAttribute('data-name',data.name);
+    } else if (r.preview) { r.preview.remove(); r.preview = null; }
+    r.data = data;
+  }
+  var lastManifest = JSON.stringify([document.getElementById('page-title').textContent,Array.from(records.values()).map(function (r) { return r.data; })]);
+  function reconcile(manifest) {
+    if (!manifest || typeof manifest.title !== 'string' || !Array.isArray(manifest.files)) throw new Error('Invalid manifest');
+    var seen = new Set(), files = manifest.files.map(function (f) {
+      if (!f || !uuid(f.id) || typeof f.name !== 'string' || !Number.isSafeInteger(f.size) || f.size < 0) throw new Error('Invalid file');
+      var id = f.id.toLowerCase(); if (seen.has(id)) throw new Error('Duplicate file'); seen.add(id);
+      return {id:id,name:f.name,size:f.size,relativePath:typeof f.relativePath === 'string' ? f.relativePath : '',previewKind:safePreview(f.name,f.previewKind)};
+    });
+    var signature = JSON.stringify([manifest.title,files]);
+    if (signature === lastManifest) return;
+    var focused = document.activeElement;
+    if (previewId && !seen.has(previewId)) closePreview();
+    records.forEach(function (r,id) { if (!seen.has(id)) { r.row.remove(); records.delete(id); } });
+    files.forEach(function (data,index) {
+      var r = records.get(data.id);
+      if (!r) { r = createRecord(data); records.set(data.id,r); }
+      patch(r,data);
+      if (fileList.children[index] !== r.row) fileList.insertBefore(r.row,fileList.children[index] || null);
+    });
+    var empty = document.getElementById('file-empty');
+    if (!files.length && !empty) {
+      empty = element('div','empty',fileList); empty.id = 'file-empty';
+      element('p','',empty).textContent = '暂无可下载的文件';
+      element('p','',empty).textContent = '请在电脑上添加要分享的文件。';
+    } else if (files.length && empty) empty.remove();
+    checks = files.map(function (data) { return records.get(data.id).check; });
+    document.getElementById('file-count').textContent = String(files.length);
+    document.getElementById('file-total').textContent = sizeLabel(files.reduce(function (sum,f) { return sum + f.size; },0));
+    var title = document.getElementById('page-title');
+    if (title.textContent !== manifest.title) { title.textContent = manifest.title; document.title = manifest.title + ' · LanDrop 文件传输'; }
+    selection();
+    if (focused && focused.isConnected && document.activeElement !== focused && focused.focus) focused.focus({preventScroll:true});
+    lastManifest = signature;
+  }
+  var pollTimer, manifestRequest;
+  function scheduleManifest() {
+    window.clearTimeout(pollTimer);
+    if (document.visibilityState !== 'hidden') pollTimer = window.setTimeout(refreshManifest,2000);
+  }
+  function interruptManifest(request) {
+    if (!request) return;
+    request.cancelled = true;
+    window.clearTimeout(request.timeout);
+    request.interrupt();
+    if (request.controller) request.controller.abort();
+  }
+  async function refreshManifest() {
+    if (document.visibilityState === 'hidden' || manifestRequest) return;
+    // Each request owns its timeout/finally. An old body/abort arriving late
+    // cannot update the DOM or clear the next visible generation's timers.
+    var request = {controller:window.AbortController ? new window.AbortController() : null};
+    manifestRequest = request;
+    var interrupted = new Promise(function (resolve) { request.interrupt = resolve; });
+    request.timeout = window.setTimeout(function () { interruptManifest(request); },8000);
+    try {
+      var options = {credentials:'same-origin',cache:'no-store'};
+      if (request.controller) options.signal = request.controller.signal;
+      var data = await Promise.race([fetch('/manifest',options).then(function (response) {
+        if (response.status !== 200) throw new Error('Manifest unavailable');
+        return response.json();
+      }),interrupted]);
+      if (manifestRequest === request && !request.cancelled) reconcile(data);
+    } catch (_) { /* Retain the last working list; transient failures stay quiet. */ }
+    finally {
+      window.clearTimeout(request.timeout);
+      if (manifestRequest === request) { manifestRequest = null; scheduleManifest(); }
+    }
+  }
+  if (document.addEventListener) document.addEventListener('visibilitychange',function () {
+    window.clearTimeout(pollTimer);
+    var previous = manifestRequest; manifestRequest = null;
+    interruptManifest(previous);
+    if (document.visibilityState !== 'hidden') refreshManifest();
+  });
+  scheduleManifest();
   // Pure local SHA-256: works on HTTP LAN origins without crypto.subtle.
   function sha256(bytes) {
     var primes = [], constants = [], initial = [];

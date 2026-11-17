@@ -103,6 +103,7 @@ void main() {
         'gif',
         'webp',
         'avif',
+        'bmp',
         'mp4',
         'webm',
         'mov',
@@ -110,6 +111,8 @@ void main() {
         'wav',
         'ogg',
         'm4a',
+        'aac',
+        'flac',
         'svg',
         'html'
       ])
@@ -122,9 +125,9 @@ void main() {
     expect(html, contains('href="/download.zip"'));
     expect(html, contains('id="select-all"'));
     expect(html, contains('目录/&lt;img&gt;'));
-    expect(RegExp('class="action preview-button"').allMatches(html).length, 13);
-    expect(html, isNot(contains('data-name="a.svg"')));
-    expect(html, isNot(contains('data-name="a.html"')));
+    expect(RegExp('class="action preview-button"').allMatches(html).length, 16);
+    expect(html, isNot(contains('data-kind="image" data-name="a.svg"')));
+    expect(html, isNot(contains('data-kind="image" data-name="a.html"')));
     expect(
         html,
         contains(
@@ -147,7 +150,7 @@ void main() {
     expect(html, isNot(contains('<script>alert(1)</script>')));
     expect(html, contains('&quot; onmouseover=&quot;evil() &lt;a&gt;.txt'));
     expect(html, isNot(contains('../../etc/passwd')));
-    expect(html, contains('<strong>1</strong> 个文件'));
+    expect(html, contains('<strong id="file-count">1</strong> 个文件'));
   });
 }
 

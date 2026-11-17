@@ -11,6 +11,8 @@ import 'package:landrop/landrop_controller.dart';
 import 'package:landrop/main.dart';
 import 'package:landrop/app_theme.dart';
 import 'package:landrop/desktop_file_manager.dart';
+import 'package:landrop/theme_controller.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 class _PreviewController extends LanDropController {
   _PreviewController({this.empty = false});
@@ -50,6 +52,7 @@ class _PreviewController extends LanDropController {
           name: '手机拍摄的照片.jpg',
           path: '/Users/you/Downloads/LanDrop/手机拍摄的照片.jpg',
           size: 3485286,
+          pageId: pages.first.id,
           pageTitle: '周末旅行',
           receivedAt: DateTime(2026, 11, 17, 19, 32)));
     }
@@ -66,6 +69,10 @@ class _PreviewController extends LanDropController {
     }
     notifyListeners();
   }
+
+  @override
+  Future<String> receiveDirectoryFor(SharePage page) async =>
+      "/virtual/receipts/${page.id}";
 
   @override
   int? portFor(SharePage page) => page.running ? 47123 : null;
@@ -110,6 +117,7 @@ Future<void> _captureImage(GlobalKey key, String name) async {
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
+  setUp(() => SharedPreferences.setMockInitialValues({}));
   setUpAll(() async {
     if (_fontPath.isNotEmpty) {
       final bytes = File(_fontPath).readAsBytesSync();
@@ -133,6 +141,8 @@ void main() {
       tester.view.devicePixelRatio = 1;
       addTearDown(tester.view.resetPhysicalSize);
       addTearDown(tester.view.resetDevicePixelRatio);
+      final controller = _PreviewController();
+      addTearDown(controller.dispose);
       final key = GlobalKey();
       await tester.pumpWidget(RepaintBoundary(
           key: key,
@@ -140,20 +150,72 @@ void main() {
               debugShowCheckedModeBanner: false,
               theme: AppTheme.light,
               home: HomeScreen(
-                  controller: _PreviewController(),
-                  pickFiles: () async => []))));
+                  controller: controller, pickFiles: () async => []))));
       await tester.pumpAndSettle();
       expect(find.text('周末旅行'), findsWidgets);
-      expect(find.text('周末旅行照片.zip'), findsOneWidget);
-      expect(find.text('海边的日落.jpg'), findsOneWidget);
+      expect(find.text('周末旅行照片.zip'), findsNothing);
+      expect(find.text('传输动态'), findsNothing);
+      expect(find.text('接收记录'), findsNothing);
+      expect(find.text('手机拍摄的旅行短片.mp4'), findsNothing);
       expect(tester.takeException(), isNull);
       await tester
           .runAsync(() => _captureImage(key, 'desktop-${width.toInt()}'));
+      await tester.tap(find.byKey(const ValueKey(
+          'open-transfer-00000000-0000-4000-8000-000000000001')));
+      await tester.pumpAndSettle();
+      expect(find.text('周末旅行照片.zip'), findsOneWidget);
+      expect(find.text('海边的日落.jpg'), findsOneWidget);
+      expect(find.text('手机拍摄的照片.jpg'), findsOneWidget);
+      expect(tester.takeException(), isNull);
+      await tester.runAsync(
+          () => _captureImage(key, 'desktop-detail-${width.toInt()}'));
       await tester.pumpWidget(const SizedBox.shrink());
     });
   }
 
-  testWidgets('empty state opens file dialog without native picker',
+  testWidgets('dark transfer detail and settings have themed surfaces',
+      (tester) async {
+    tester.view.physicalSize = const Size(1440, 1100);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    final controller = _PreviewController();
+    final appearance = ThemeController();
+    addTearDown(controller.dispose);
+    addTearDown(appearance.dispose);
+    await appearance.setMode(ThemeMode.dark);
+    final key = GlobalKey();
+    await tester.pumpWidget(RepaintBoundary(
+        key: key,
+        child: LanDropApp(
+          appearance: appearance,
+          home: HomeScreen(
+              controller: controller,
+              appearance: appearance,
+              pickFiles: () async => []),
+        )));
+    await tester.pumpAndSettle();
+    expect(Theme.of(tester.element(find.byType(HomeScreen))).brightness,
+        Brightness.dark);
+    await tester.tap(find.byKey(
+        const ValueKey('open-transfer-00000000-0000-4000-8000-000000000001')));
+    await tester.pumpAndSettle();
+    expect(find.text('来自手机的文件'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+    await tester.runAsync(() => _captureImage(key, 'desktop-dark'));
+    await tester.tap(find.text('应用设置').first);
+    await tester.pumpAndSettle();
+    expect(
+        tester
+            .widget<ChoiceChip>(find.byKey(const ValueKey('theme-dark')))
+            .selected,
+        isTrue);
+    expect(tester.takeException(), isNull);
+    await tester.runAsync(() => _captureImage(key, 'desktop-settings-dark'));
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
+  testWidgets('empty state opens name-only creation without native picker',
       (tester) async {
     tester.view.physicalSize = const Size(1200, 900);
     tester.view.devicePixelRatio = 1;
@@ -165,16 +227,18 @@ void main() {
             controller: _PreviewController(empty: true),
             pickFiles: () async => [])));
     await tester.pumpAndSettle();
-    final create = find.widgetWithText(FilledButton, '新建页面');
+    final create = find.byKey(const ValueKey('new-transfer'));
     expect(create, findsWidgets);
     await tester.tap(create.first);
     await tester.pumpAndSettle();
-    expect(find.text('选择文件（可多选）'), findsOneWidget);
+    expect(find.text('传输名称'), findsOneWidget);
+    expect(find.text('选择文件（可多选）'), findsNothing);
     expect(tester.takeException(), isNull);
   });
-  testWidgets('reception navigation shows saved files and copies actual path',
+  testWidgets(
+      'transfer detail shows shared and received files and copies actual path',
       (tester) async {
-    tester.view.physicalSize = const Size(1440, 960);
+    tester.view.physicalSize = const Size(1440, 1450);
     tester.view.devicePixelRatio = 1;
     addTearDown(tester.view.resetPhysicalSize);
     addTearDown(tester.view.resetDevicePixelRatio);
@@ -189,11 +253,14 @@ void main() {
             home: HomeScreen(
                 controller: controller, pickFiles: () async => []))));
     await tester.pumpAndSettle();
-    await tester.tap(find.text('接收记录').first);
+    await tester.tap(find.byKey(
+        const ValueKey('open-transfer-00000000-0000-4000-8000-000000000001')));
     await tester.pumpAndSettle();
     expect(find.text('手机拍摄的照片.jpg'), findsOneWidget);
     expect(find.text('来自手机的文件'), findsOneWidget);
-    expect(find.text('周末旅行照片.zip'), findsNothing);
+    expect(find.text('周末旅行照片.zip'), findsOneWidget);
+    await tester.ensureVisible(find.text('手机拍摄的照片.jpg'));
+    await tester.pumpAndSettle();
     await tester.runAsync(() => _captureImage(key, 'desktop-received'));
     String? copied;
     tester.binding.defaultBinaryMessenger
@@ -203,14 +270,15 @@ void main() {
       }
       return null;
     });
+    await tester.ensureVisible(find.byTooltip('复制保存路径'));
+    await tester.pumpAndSettle();
     await tester.tap(find.byTooltip('复制保存路径'));
     await tester.pumpAndSettle();
     expect(copied, controller.receivedFiles.single.path);
     expect(find.text('文件路径已复制'), findsOneWidget);
     ScaffoldMessenger.of(tester.element(find.byType(HomeScreen)))
         .removeCurrentSnackBar();
-    for (final entry
-        in {'传输动态': 'desktop-transfers', '应用设置': 'desktop-settings'}.entries) {
+    for (final entry in {'应用设置': 'desktop-settings'}.entries) {
       await tester.tap(find.text(entry.key).first);
       await tester.pumpAndSettle();
       await tester.runAsync(() => _captureImage(key, entry.value));
@@ -235,13 +303,18 @@ void main() {
           theme: AppTheme.light,
           home: HomeScreen(controller: controller, fileManager: manager)));
       await tester.pumpAndSettle();
-      await tester.tap(find.text('接收记录').first);
+      await tester.tap(find.byKey(const ValueKey(
+          'open-transfer-00000000-0000-4000-8000-000000000001')));
+      await tester.pumpAndSettle();
+      await tester.ensureVisible(find.text('打开接收文件夹'));
       await tester.pumpAndSettle();
       await tester.tap(find.text('打开接收文件夹'));
       await tester.pumpAndSettle();
-      expect(manager.opened, [controller.receiveDirectory]);
+      expect(manager.opened,
+          [await controller.receiveDirectoryFor(controller.pages.single)]);
       final reveal = find.text('在文件夹中显示');
       await tester.ensureVisible(reveal);
+      await tester.pumpAndSettle();
       await tester.tap(reveal);
       await tester.pumpAndSettle();
       expect(manager.revealed, [controller.receivedFiles.single.path]);
@@ -268,9 +341,12 @@ void main() {
         theme: AppTheme.light,
         home: HomeScreen(controller: controller, fileManager: manager)));
     await tester.pumpAndSettle();
-    await tester.tap(find.text('接收记录').first);
+    await tester.tap(find.byKey(
+        const ValueKey('open-transfer-00000000-0000-4000-8000-000000000001')));
     await tester.pumpAndSettle();
     final folder = find.byKey(const ValueKey('open-receive-directory'));
+    await tester.ensureVisible(folder);
+    await tester.pumpAndSettle();
     await tester.tap(folder);
     await tester.pump();
     expect(tester.widget<OutlinedButton>(folder).onPressed, isNull);

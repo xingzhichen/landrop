@@ -28,7 +28,7 @@ void main(List<String> args) {
   final examples = {
     'index.html': renderDownloadPage('周末旅行', files),
     'empty.html': renderDownloadPage('临时传输', const []),
-    'stress.html': renderDownloadPage('一个很长的传输页面名称与文件标题用于验证窄屏排版不会溢出', [
+    'stress.html': renderDownloadPage('一个很长的传输名称与文件标题用于验证窄屏排版不会溢出', [
       const DownloadItem(
           id: '00000000-0000-4000-8000-000000000001',
           name:

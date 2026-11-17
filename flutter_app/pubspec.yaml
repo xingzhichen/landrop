@@ -1,7 +1,7 @@
 name: landrop
-description: Cross-platform LAN file sharing with QR download pages.
+description: Cross-platform LAN file sharing and uploads with named transfers.
 publish_to: none
-version: 1.2.0+5
+version: 1.3.0+6
 
 environment:
   sdk: '>=3.4.0 <4.0.0'

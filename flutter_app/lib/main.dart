@@ -16,25 +16,48 @@ import 'desktop_file_manager.dart';
 import 'desktop_shell.dart';
 import 'workspace_dialogs.dart';
 import 'workspace_motion.dart';
-import 'transfer_panel.dart';
+import 'theme_controller.dart';
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
   runApp(const LanDropApp());
 }
 
-class LanDropApp extends StatelessWidget {
-  const LanDropApp({super.key});
+class LanDropApp extends StatefulWidget {
+  const LanDropApp({super.key, this.appearance, this.home});
+  final ThemeController? appearance;
+  final Widget? home;
+  @override
+  State<LanDropApp> createState() => _LanDropAppState();
+}
+
+class _LanDropAppState extends State<LanDropApp> {
+  late final ThemeController _appearance =
+      widget.appearance ?? ThemeController();
+  @override
+  void initState() {
+    super.initState();
+    unawaited(_appearance.initialize().catchError((Object error) {
+      debugPrint('Theme preferences unavailable: $error');
+    }));
+  }
 
   @override
-  Widget build(BuildContext context) {
-    return MaterialApp(
-      title: 'LanDrop',
-      debugShowCheckedModeBanner: false,
-      theme: AppTheme.light,
-      home: const HomeScreen(),
-    );
+  void dispose() {
+    if (widget.appearance == null) _appearance.dispose();
+    super.dispose();
   }
+
+  @override
+  Widget build(BuildContext context) => AnimatedBuilder(
+      animation: _appearance,
+      builder: (_, __) => MaterialApp(
+          title: 'LanDrop',
+          debugShowCheckedModeBanner: false,
+          theme: AppTheme.light,
+          darkTheme: AppTheme.dark,
+          themeMode: _appearance.mode,
+          home: widget.home ?? HomeScreen(appearance: _appearance)));
 }
 
 class HomeScreen extends StatefulWidget {
@@ -44,7 +67,8 @@ class HomeScreen extends StatefulWidget {
       this.pickFiles,
       this.fileManager,
       this.shell,
-      this.pickDirectory});
+      this.pickDirectory,
+      this.appearance});
 
   /// Optional state/picker injection for native widget previews and tests.
   /// An injected controller remains owned by its caller and is not disposed here.
@@ -53,6 +77,7 @@ class HomeScreen extends StatefulWidget {
   final DesktopFileManager? fileManager;
   final DesktopShell? shell;
   final PickDirectory? pickDirectory;
+  final ThemeController? appearance;
 
   @override
   State<HomeScreen> createState() => _HomeScreenState();
@@ -73,13 +98,19 @@ class _HomeScreenState extends State<HomeScreen> {
   bool _dragging = false;
   bool _handlingDrop = false;
   bool _backgroundMode = true;
-  static const _titles = ['传输页面', '接收记录', '传输动态', '应用设置'];
-  static const _descriptions = [
-    '把文件交给同一网络中的设备。',
-    '来自手机的文件，已保存到这台设备。',
-    '查看本机收发进度，暂停任务可从网页继续。',
-    '管理后台运行与各页面的接收位置。'
-  ];
+  late final ThemeController _appearance =
+      widget.appearance ?? ThemeController();
+  AppColors get _colors => AppTheme.colorsOf(context);
+  String? _selectedTransferId;
+  SharePage? get _selectedTransfer {
+    for (final page in _controller.pages) {
+      if (page.id == _selectedTransferId) return page;
+    }
+    return null;
+  }
+
+  static const _titles = ['我的传输', '应用设置'];
+  static const _descriptions = ['创建一组传输，让电脑与手机在这里双向收发。', '设置外观、后台运行与各传输的接收位置。'];
   int _destination = 0;
   bool _loading = true;
   bool _working = false;
@@ -93,6 +124,11 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   Future<void> _initialize() async {
+    try {
+      await _appearance.initialize();
+    } catch (error) {
+      debugPrint('Theme preferences unavailable: $error');
+    }
     try {
       await _controller.initialize();
     } catch (error) {
@@ -121,6 +157,7 @@ class _HomeScreenState extends State<HomeScreen> {
   @override
   void dispose() {
     _shell.dispose();
+    if (widget.appearance == null) _appearance.dispose();
     if (widget.controller == null) _controller.dispose();
     super.dispose();
   }
@@ -144,16 +181,19 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   Future<void> _newPage() async {
-    final created = await showDialog<(String, List<PlatformFile>)>(
-      context: context,
-      builder: (_) => CreatePageDialog(pickFiles: _pickFiles),
-    );
-    if (created == null || !mounted) return;
+    final name = await showDialog<String>(
+        context: context, builder: (_) => const CreatePageDialog());
+    if (name == null || !mounted) return;
     await _perform(() async {
-      final page = await _controller.createPage(created.$1);
+      final page = await _controller.createPage(name);
       try {
-        await _controller.addFiles(page, created.$2);
         await _controller.start(page);
+        if (mounted) {
+          setState(() {
+            _selectedTransferId = page.id;
+            _destination = 0;
+          });
+        }
       } catch (_) {
         await _controller.removePage(page);
         rethrow;
@@ -195,6 +235,14 @@ class _HomeScreenState extends State<HomeScreen> {
     _handlingDrop = true;
     if (_dragging) setState(() => _dragging = false);
     try {
+      final selected = _destination == 0 ? _selectedTransfer : null;
+      if (selected != null) {
+        await _perform(() async {
+          await _controller.addPaths(selected, paths);
+          if (mounted) _notice('已添加到「${selected.title}」，手机网页将自动更新');
+        });
+        return;
+      }
       final choice = await showDialog<DropChoice>(
           context: context,
           builder: (_) => ImportPathsDialog(
@@ -213,7 +261,10 @@ class _HomeScreenState extends State<HomeScreen> {
           }
           if (isNew) await _controller.start(page);
           if (mounted) {
-            setState(() => _destination = 0);
+            setState(() {
+              _destination = 0;
+              _selectedTransferId = page.id;
+            });
             _notice('已添加 $added 个文件，文件夹结构已保留');
           }
         } catch (_) {
@@ -249,7 +300,7 @@ class _HomeScreenState extends State<HomeScreen> {
       });
 
   Future<void> _quit() async {
-    if (!await _confirm('退出 LanDrop？', '退出会停止所有传输页面及正在传输的任务。已接收文件保留。',
+    if (!await _confirm('退出 LanDrop？', '退出会停止所有传输服务及正在传输的任务。已接收文件保留。',
         confirmText: '退出')) {
       return;
     }
@@ -282,10 +333,15 @@ class _HomeScreenState extends State<HomeScreen> {
 
   Future<void> _deletePage(SharePage page) async {
     if (!await _confirm(
-        '删除「${page.title}」？', '此页面会停止服务并清除未完成的上传；已接收文件和电脑上的原文件不会删除。')) {
+        '删除「${page.title}」？', '此传输会停止服务并清除未完成的上传；已接收文件和电脑上的原文件不会删除。')) {
       return;
     }
-    await _perform(() => _controller.removePage(page));
+    await _perform(() async {
+      await _controller.removePage(page);
+      if (mounted && _selectedTransferId == page.id) {
+        setState(() => _selectedTransferId = null);
+      }
+    });
   }
 
   Future<void> _deleteFile(SharePage page, SharedFile file) async {
@@ -305,7 +361,7 @@ class _HomeScreenState extends State<HomeScreen> {
   @override
   Widget build(BuildContext context) {
     return AnimatedBuilder(
-      animation: _controller,
+      animation: Listenable.merge([_controller, _appearance]),
       builder: (context, _) {
         final available = _controller.addresses;
         final address = available.contains(_selectedAddress)
@@ -340,17 +396,17 @@ class _HomeScreenState extends State<HomeScreen> {
                       opacity: _dragging ? 1 : 0,
                       duration: motionDuration(context),
                       child: Container(
-                          color: AppTheme.primary.withValues(alpha: .12),
+                          color: _colors.primary.withValues(alpha: .12),
                           alignment: Alignment.center,
                           padding: const EdgeInsets.all(30),
-                          child: const Card(
+                          child: Card(
                               child: Padding(
                                   padding: EdgeInsets.all(32),
                                   child: Column(
                                       mainAxisSize: MainAxisSize.min,
                                       children: [
                                         Icon(Icons.drive_folder_upload_outlined,
-                                            color: AppTheme.primary, size: 48),
+                                            color: _colors.primary, size: 48),
                                         SizedBox(height: 16),
                                         Text('松开以分享文件或文件夹',
                                             textAlign: TextAlign.center,
@@ -358,7 +414,7 @@ class _HomeScreenState extends State<HomeScreen> {
                                                 fontSize: 22,
                                                 fontWeight: FontWeight.w700)),
                                         SizedBox(height: 8),
-                                        Text('下一步选择新建页面或添加到已有页面。',
+                                        Text('下一步选择新建传输或添加到已有传输。',
                                             textAlign: TextAlign.center)
                                       ]))))))),
         ]);
@@ -366,8 +422,8 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
-  Widget _brand() => const Row(mainAxisSize: MainAxisSize.min, children: [
-        Icon(Icons.swap_vert_rounded, color: AppTheme.primary, size: 29),
+  Widget _brand() => Row(mainAxisSize: MainAxisSize.min, children: [
+        Icon(Icons.swap_vert_rounded, color: _colors.primary, size: 29),
         SizedBox(width: 9),
         Flexible(
             child: Text('LanDrop',
@@ -384,26 +440,29 @@ class _HomeScreenState extends State<HomeScreen> {
     return AnimatedContainer(
         duration: motionDuration(context),
         decoration: BoxDecoration(
-            color: selected ? AppTheme.primaryTint : Colors.transparent,
+            color: selected ? _colors.primaryTint : Colors.transparent,
             borderRadius: BorderRadius.circular(12)),
         child: Material(
-          color: selected ? AppTheme.primaryTint : Colors.transparent,
+          color: selected ? _colors.primaryTint : Colors.transparent,
           borderRadius: BorderRadius.circular(12),
           child: InkWell(
             borderRadius: BorderRadius.circular(12),
-            onTap: () => setState(() => _destination = index),
+            onTap: () => setState(() {
+              _destination = index;
+              if (index == 0) _selectedTransferId = null;
+            }),
             child: Padding(
               padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 14),
               child: Row(mainAxisSize: MainAxisSize.min, children: [
                 Icon(icon,
                     size: 20,
-                    color: selected ? AppTheme.primary : AppTheme.muted),
+                    color: selected ? _colors.primary : _colors.muted),
                 const SizedBox(width: 10),
                 Text(label,
                     style: TextStyle(
                         fontWeight:
                             selected ? FontWeight.w700 : FontWeight.w500,
-                        color: selected ? AppTheme.primary : AppTheme.muted)),
+                        color: selected ? _colors.primary : _colors.muted)),
               ]),
             ),
           ),
@@ -412,40 +471,36 @@ class _HomeScreenState extends State<HomeScreen> {
 
   Widget _sidebar() => Container(
         width: 200,
-        decoration: const BoxDecoration(
-            color: AppTheme.surface,
-            border: Border(right: BorderSide(color: AppTheme.border))),
+        decoration: BoxDecoration(
+            color: _colors.surface,
+            border: Border(right: BorderSide(color: _colors.border))),
         padding: const EdgeInsets.fromLTRB(18, 31, 18, 24),
         child:
             Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
           Padding(padding: const EdgeInsets.only(left: 7), child: _brand()),
           const SizedBox(height: 9),
-          const Padding(
+          Padding(
               padding: EdgeInsets.only(left: 10),
               child: Text('局域网文件传输',
-                  style: TextStyle(fontSize: 12, color: AppTheme.muted))),
+                  style: TextStyle(fontSize: 12, color: _colors.muted))),
           const SizedBox(height: 40),
-          _navItem(0, Icons.folder_outlined, '传输页面'),
+          _navItem(0, Icons.swap_horiz_rounded, '我的传输'),
           const SizedBox(height: 7),
-          _navItem(1, Icons.move_to_inbox_outlined, '接收记录'),
-          const SizedBox(height: 7),
-          _navItem(2, Icons.sync_alt_rounded, '传输动态'),
-          const SizedBox(height: 7),
-          _navItem(3, Icons.tune_outlined, '应用设置'),
+          _navItem(1, Icons.tune_outlined, '应用设置'),
           const Spacer(),
           const Divider(),
           const SizedBox(height: 18),
-          const Row(children: [
-            Icon(Icons.devices_outlined, size: 17, color: AppTheme.muted),
+          Row(children: [
+            Icon(Icons.devices_outlined, size: 17, color: _colors.muted),
             SizedBox(width: 8),
             Text('设备间，直接传输',
-                style: TextStyle(fontSize: 12, color: AppTheme.muted)),
+                style: TextStyle(fontSize: 12, color: _colors.muted)),
           ]),
         ]),
       );
 
   Widget _topNavigation() => Material(
-        color: AppTheme.surface,
+        color: _colors.surface,
         child: Padding(
           padding: const EdgeInsets.fromLTRB(16, 14, 16, 10),
           child:
@@ -453,10 +508,8 @@ class _HomeScreenState extends State<HomeScreen> {
             _brand(),
             const SizedBox(height: 14),
             Wrap(spacing: 8, runSpacing: 6, children: [
-              _navItem(0, Icons.folder_outlined, '传输页面'),
-              _navItem(1, Icons.move_to_inbox_outlined, '接收记录'),
-              _navItem(2, Icons.sync_alt_rounded, '传输动态'),
-              _navItem(3, Icons.tune_outlined, '应用设置'),
+              _navItem(0, Icons.swap_horiz_rounded, '我的传输'),
+              _navItem(1, Icons.tune_outlined, '应用设置'),
             ]),
           ]),
         ),
@@ -478,6 +531,7 @@ class _HomeScreenState extends State<HomeScreen> {
               child:
                   SelectableText(_startupError!, textAlign: TextAlign.center)));
     }
+    final active = _destination == 0 ? _selectedTransfer : null;
     final running = _controller.pages
         .where((page) => _controller.portFor(page) != null)
         .length;
@@ -496,9 +550,9 @@ class _HomeScreenState extends State<HomeScreen> {
                 spacing: 16,
                 runSpacing: 12,
                 children: [
-                  Text('工作台  /  ${_titles[_destination]}',
-                      style:
-                          const TextStyle(fontSize: 12, color: AppTheme.muted)),
+                  Text(
+                      '工作台  /  ${_titles[_destination]}${active == null ? '' : '  /  ${active.title}'}',
+                      style: TextStyle(fontSize: 12, color: _colors.muted)),
                   _status(address == null ? '未连接局域网' : '局域网可用',
                       active: address != null),
                 ]),
@@ -507,29 +561,24 @@ class _HomeScreenState extends State<HomeScreen> {
               final heading = Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Text(_titles[_destination],
+                    Text(active?.title ?? _titles[_destination],
                         style: TextStyle(
                             fontSize: desktop ? 32 : 28,
                             fontWeight: FontWeight.w700,
                             letterSpacing: -0.7)),
                     const SizedBox(height: 7),
-                    Text(_descriptions[_destination],
-                        style: const TextStyle(
-                            color: AppTheme.muted, height: 1.6)),
+                    Text(
+                        active == null
+                            ? _descriptions[_destination]
+                            : '同一传输内，电脑与手机都可以发送和接收文件。',
+                        style: TextStyle(color: _colors.muted, height: 1.6)),
                   ]);
-              final button = Wrap(spacing: 8, runSpacing: 8, children: [
-                ActionMotion(
-                    child: OutlinedButton.icon(
-                        onPressed: _working ? null : () => _addFolder(),
-                        icon: const Icon(Icons.create_new_folder_outlined,
-                            size: 19),
-                        label: const Text('分享文件夹'))),
-                ActionMotion(
-                    child: FilledButton.icon(
-                        onPressed: _working ? null : _newPage,
-                        icon: const Icon(Icons.add, size: 19),
-                        label: const Text('新建页面')))
-              ]);
+              final button = ActionMotion(
+                  child: FilledButton.icon(
+                      key: const ValueKey('new-transfer'),
+                      onPressed: _working ? null : _newPage,
+                      icon: const Icon(Icons.add, size: 19),
+                      label: const Text('新建传输')));
               if (constraints.maxWidth < 720) {
                 return Column(
                     crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -550,92 +599,112 @@ class _HomeScreenState extends State<HomeScreen> {
                   padding: EdgeInsets.only(bottom: 16),
                   child: LinearProgressIndicator(semanticsLabel: '正在处理操作')),
             AnimatedSwitcher(
-                duration: motionDuration(context, 180),
-                switchInCurve: Curves.easeOutCubic,
-                child: KeyedSubtree(
-                    key: ValueKey(_destination),
-                    child: _destination == 0
-                        ? Column(
-                            crossAxisAlignment: CrossAxisAlignment.stretch,
-                            children: [
-                                Container(
-                                    padding: const EdgeInsets.symmetric(
-                                        horizontal: 16, vertical: 14),
-                                    decoration: BoxDecoration(
-                                        border:
-                                            Border.all(color: AppTheme.border),
-                                        borderRadius:
-                                            BorderRadius.circular(12)),
-                                    child: const Row(children: [
-                                      Icon(Icons.drive_folder_upload_outlined,
-                                          size: 22, color: AppTheme.primary),
-                                      SizedBox(width: 12),
-                                      Expanded(
-                                          child: Text(
-                                              '可将文件或文件夹拖入窗口；关闭窗口后仍可在菜单栏／系统托盘中管理。',
-                                              style: TextStyle(
-                                                  fontSize: 12,
-                                                  color: AppTheme.muted,
-                                                  height: 1.6)))
-                                    ])),
-                                const SizedBox(height: 16),
-                                _networkCard(available, address),
-                                const SizedBox(height: 27),
-                                Wrap(
-                                    spacing: 12,
-                                    runSpacing: 6,
-                                    crossAxisAlignment:
-                                        WrapCrossAlignment.center,
-                                    children: [
-                                      const Text('我的页面',
-                                          style: TextStyle(
-                                              fontSize: 16,
-                                              fontWeight: FontWeight.w700)),
-                                      Text(
-                                          '${_controller.pages.length} 个页面 · $running 个运行中',
-                                          style: const TextStyle(
-                                              fontSize: 12,
-                                              color: AppTheme.muted)),
-                                    ]),
-                                const SizedBox(height: 14),
-                                if (_controller.pages.isEmpty) _emptyCard(),
-                                for (final page in _controller.pages) ...[
-                                  WorkspaceEntry(
-                                      key: ValueKey(page.id),
-                                      child: AnimatedSize(
-                                          duration:
-                                              motionDuration(context, 220),
-                                          alignment: Alignment.topCenter,
-                                          child: _pageCard(page, address))),
-                                  const SizedBox(height: 18)
-                                ],
-                              ])
-                        : _destination == 1
-                            ? _receivedCard()
-                            : _destination == 2
-                                ? TransferPanel(
-                                    tasks: _controller.transfers,
-                                    onCancel: (task) => unawaited(_perform(() =>
-                                        _controller.cancelTransfer(task.id))))
-                                : _settingsCard())),
+              duration: motionDuration(context, 180),
+              child: KeyedSubtree(
+                key: ValueKey(
+                    _destination == 1 ? 'settings' : active?.id ?? 'transfers'),
+                child: _destination == 1
+                    ? _settingsCard()
+                    : Column(
+                        crossAxisAlignment: CrossAxisAlignment.stretch,
+                        children: [
+                          if (active != null) ...[
+                            Align(
+                                alignment: Alignment.centerLeft,
+                                child: ActionMotion(
+                                    child: TextButton.icon(
+                                        key:
+                                            const ValueKey('back-to-transfers'),
+                                        onPressed: () => setState(
+                                            () => _selectedTransferId = null),
+                                        icon: const Icon(Icons.arrow_back,
+                                            size: 18),
+                                        label: const Text('所有传输')))),
+                            const SizedBox(height: 12),
+                          ],
+                          _networkCard(available, address),
+                          const SizedBox(height: 22),
+                          if (active == null) ...[
+                            Text(
+                                '${_controller.pages.length} 个传输 · $running 个运行中',
+                                style: TextStyle(color: _colors.muted)),
+                            const SizedBox(height: 14),
+                            if (_controller.pages.isEmpty) _emptyCard(),
+                            for (final page in _controller.pages) ...[
+                              WorkspaceEntry(
+                                  key: ValueKey(page.id),
+                                  child: _transferSummary(page)),
+                              const SizedBox(height: 14),
+                            ],
+                          ] else ...[
+                            _pageCard(active, address),
+                            const SizedBox(height: 20),
+                            _receivedCard(active),
+                          ],
+                        ],
+                      ),
+              ),
+            ),
           ]),
         )),
       ],
     );
   }
 
+  Widget _transferSummary(SharePage page) => ActionMotion(
+          child: Card(
+        child: InkWell(
+          key: ValueKey('open-transfer-${page.id}'),
+          borderRadius: BorderRadius.circular(16),
+          onTap: () => setState(() => _selectedTransferId = page.id),
+          child: Padding(
+              padding: const EdgeInsets.all(22),
+              child: Row(children: [
+                Container(
+                    padding: const EdgeInsets.all(12),
+                    decoration: BoxDecoration(
+                        color: _colors.primaryTint,
+                        borderRadius: BorderRadius.circular(12)),
+                    child: Icon(Icons.swap_horiz_rounded,
+                        color: _colors.primary, size: 26)),
+                const SizedBox(width: 16),
+                Expanded(
+                    child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                      Text(page.title,
+                          maxLines: 2,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(
+                              fontSize: 18, fontWeight: FontWeight.w700)),
+                      const SizedBox(height: 8),
+                      Wrap(spacing: 12, runSpacing: 8, children: [
+                        _status(
+                            _controller.portFor(page) == null ? '已停止' : '运行中',
+                            active: _controller.portFor(page) != null),
+                        Text(
+                            '分享 ${page.files.length} 个 · 收到 ${_controller.receivedFilesFor(page).length} 个',
+                            style: TextStyle(color: _colors.muted, height: 2)),
+                      ]),
+                    ])),
+                const SizedBox(width: 8),
+                Icon(Icons.chevron_right, color: _colors.muted),
+              ])),
+        ),
+      ));
+
   Widget _status(String label, {required bool active}) => Container(
         padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
         decoration: BoxDecoration(
-            color: active ? AppTheme.primaryTint : AppTheme.background,
+            color: active ? _colors.primaryTint : _colors.background,
             borderRadius: BorderRadius.circular(8)),
         child: Row(mainAxisSize: MainAxisSize.min, children: [
           Icon(Icons.circle,
-              size: 6, color: active ? AppTheme.primary : AppTheme.muted),
+              size: 6, color: active ? _colors.primary : _colors.muted),
           const SizedBox(width: 7),
           Text(label,
               style: TextStyle(
-                  color: active ? AppTheme.primary : AppTheme.muted,
+                  color: active ? _colors.primary : _colors.muted,
                   fontSize: 12,
                   fontWeight: FontWeight.w600)),
         ]),
@@ -647,33 +716,33 @@ class _HomeScreenState extends State<HomeScreen> {
           child: LayoutBuilder(builder: (context, constraints) {
             final information =
                 Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-              const Row(children: [
-                Icon(Icons.wifi_rounded, size: 20, color: AppTheme.primary),
+              Row(children: [
+                Icon(Icons.wifi_rounded, size: 20, color: _colors.primary),
                 SizedBox(width: 9),
                 Expanded(
                     child: Text('同一局域网内，扫码即可下载',
                         style: TextStyle(fontWeight: FontWeight.w600))),
               ]),
               const SizedBox(height: 7),
-              const Text('每个页面独立运行，手机无需安装应用。',
+              Text('电脑添加文件后，已打开的手机网页会自动更新。',
                   style: TextStyle(
-                      fontSize: 12, color: AppTheme.muted, height: 1.6)),
+                      fontSize: 12, color: _colors.muted, height: 1.6)),
               if (available.isEmpty)
-                const Padding(
+                Padding(
                     padding: EdgeInsets.only(top: 8),
                     child: Text('未找到本机 IPv4 地址。请连接 Wi-Fi / 局域网后刷新。',
-                        style: TextStyle(fontSize: 12, color: AppTheme.muted))),
+                        style: TextStyle(fontSize: 12, color: _colors.muted))),
               if (_controller.isMobile)
-                const Padding(
+                Padding(
                     padding: EdgeInsets.only(top: 8),
                     child: Text('移动设备请保持应用在前台；后台运行可能受 iOS / Android 系统限制。',
-                        style: TextStyle(fontSize: 12, color: AppTheme.muted))),
+                        style: TextStyle(fontSize: 12, color: _colors.muted))),
             ]);
             final selector = Row(children: [
               Expanded(
                   child: available.isEmpty
-                      ? const Text('等待网络连接',
-                          style: TextStyle(color: AppTheme.muted, fontSize: 13))
+                      ? Text('等待网络连接',
+                          style: TextStyle(color: _colors.muted, fontSize: 13))
                       : DropdownButtonFormField<String>(
                           key: ValueKey(address),
                           initialValue: address,
@@ -682,8 +751,8 @@ class _HomeScreenState extends State<HomeScreen> {
                               labelText: '本机 IP 地址',
                               contentPadding: EdgeInsets.symmetric(
                                   horizontal: 12, vertical: 10)),
-                          style: const TextStyle(
-                              color: AppTheme.ink,
+                          style: TextStyle(
+                              color: _colors.ink,
                               fontSize: 13,
                               fontFamily: 'monospace'),
                           items: available
@@ -737,6 +806,43 @@ class _HomeScreenState extends State<HomeScreen> {
                 child: Column(
                     crossAxisAlignment: CrossAxisAlignment.stretch,
                     children: [
+                      const Text('外观',
+                          style: TextStyle(
+                              fontSize: 18, fontWeight: FontWeight.w700)),
+                      const SizedBox(height: 8),
+                      Text('默认跟随系统；也可以固定使用浅色或深色。',
+                          style: TextStyle(color: _colors.muted, height: 1.6)),
+                      const SizedBox(height: 16),
+                      Wrap(spacing: 10, runSpacing: 10, children: [
+                        for (final option in [
+                          (
+                            ThemeMode.system,
+                            '跟随系统',
+                            Icons.brightness_auto_outlined
+                          ),
+                          (ThemeMode.light, '浅色', Icons.light_mode_outlined),
+                          (ThemeMode.dark, '深色', Icons.dark_mode_outlined)
+                        ])
+                          ActionMotion(
+                              child: ChoiceChip(
+                            key: ValueKey('theme-${option.$1.name}'),
+                            avatar: Icon(option.$3, size: 18),
+                            label: Text(option.$2),
+                            selected: _appearance.mode == option.$1,
+                            onSelected: _working
+                                ? null
+                                : (_) => _perform(
+                                    () => _appearance.setMode(option.$1)),
+                          )),
+                      ]),
+                    ]))),
+        const SizedBox(height: 16),
+        Card(
+            child: Padding(
+                padding: const EdgeInsets.all(22),
+                child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
                       const Text('后台运行',
                           style: TextStyle(
                               fontSize: 18, fontWeight: FontWeight.w700)),
@@ -750,11 +856,9 @@ class _HomeScreenState extends State<HomeScreen> {
                           onChanged: _working ? null : _setBackgroundMode),
                       const Divider(),
                       const SizedBox(height: 12),
-                      const Text('界面动效跟随系统的“减少动态效果”设置。动效只提供操作反馈，不会延迟传输。',
+                      Text('界面动效跟随系统的“减少动态效果”设置。动效只提供操作反馈，不会延迟传输。',
                           style: TextStyle(
-                              fontSize: 12,
-                              color: AppTheme.muted,
-                              height: 1.6)),
+                              fontSize: 12, color: _colors.muted, height: 1.6)),
                       const SizedBox(height: 12),
                       Align(
                           alignment: Alignment.centerLeft,
@@ -772,16 +876,16 @@ class _HomeScreenState extends State<HomeScreen> {
                 child: Column(
                     crossAxisAlignment: CrossAxisAlignment.stretch,
                     children: [
-                      const Text('各页面的接收位置',
+                      const Text('各传输的接收位置',
                           style: TextStyle(
                               fontSize: 18, fontWeight: FontWeight.w700)),
                       const SizedBox(height: 8),
-                      const Text('可设置独立保存位置及按日期整理；历史文件不会随设置搬动。',
-                          style: TextStyle(color: AppTheme.muted, height: 1.6)),
+                      Text('可设置独立保存位置及按日期整理；历史文件不会随设置搬动。',
+                          style: TextStyle(color: _colors.muted, height: 1.6)),
                       const SizedBox(height: 16),
                       if (_controller.pages.isEmpty)
-                        const Text('新建传输页面后，即可为它配置接收位置。',
-                            style: TextStyle(color: AppTheme.muted)),
+                        Text('新建传输后，即可为它配置接收位置。',
+                            style: TextStyle(color: _colors.muted)),
                       for (final page in _controller.pages)
                         Padding(
                             padding: const EdgeInsets.symmetric(vertical: 8),
@@ -799,9 +903,9 @@ class _HomeScreenState extends State<HomeScreen> {
                                         const SizedBox(height: 5),
                                         Text(
                                             '${page.receiveDirectory ?? '默认下载目录'}${page.organizeByDate ? ' · 按日期整理' : ''}',
-                                            style: const TextStyle(
+                                            style: TextStyle(
                                                 fontSize: 12,
-                                                color: AppTheme.muted),
+                                                color: _colors.muted),
                                             maxLines: 3,
                                             overflow: TextOverflow.ellipsis)
                                       ])),
@@ -816,148 +920,144 @@ class _HomeScreenState extends State<HomeScreen> {
                     ]))),
       ]);
 
-  Widget _receivedCard() => Card(
-        child: Padding(
-          padding: const EdgeInsets.all(22),
-          child:
-              Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
-            Wrap(
-                alignment: WrapAlignment.spaceBetween,
-                spacing: 12,
-                runSpacing: 8,
-                children: [
-                  const Text('来自手机的文件',
-                      style:
-                          TextStyle(fontSize: 18, fontWeight: FontWeight.w700)),
-                  Text('${_controller.receivedFiles.length} 个文件 · 历史记录',
-                      style:
-                          const TextStyle(fontSize: 12, color: AppTheme.muted)),
-                ]),
-            const SizedBox(height: 8),
-            const Text('手机在分享网页中上传后，文件将自动保存到此设备，无需再次下载。',
-                style: TextStyle(color: AppTheme.muted, height: 1.6)),
-            if (_controller.receiveDirectory != null) ...[
-              const SizedBox(height: 18),
-              Container(
-                padding: const EdgeInsets.fromLTRB(12, 8, 4, 8),
-                decoration: BoxDecoration(
-                    color: AppTheme.background,
-                    borderRadius: BorderRadius.circular(12),
-                    border: Border.all(color: AppTheme.border)),
-                child: Row(children: [
-                  Expanded(
-                      child: SelectableText(
-                          '接收目录：${_controller.receiveDirectory}',
-                          style: const TextStyle(
-                              fontSize: 12,
-                              color: AppTheme.muted,
-                              fontFamily: 'monospace',
-                              height: 1.6))),
-                  ActionMotion(
-                      child: IconButton(
-                          tooltip: '复制接收目录',
-                          icon: const Icon(Icons.copy_outlined, size: 18),
-                          onPressed: () =>
-                              _copy(_controller.receiveDirectory!, '接收目录已复制'))),
-                ]),
-              ),
-              const SizedBox(height: 12),
-              Wrap(children: [
-                ActionMotion(
-                    child: OutlinedButton.icon(
-                  key: const ValueKey('open-receive-directory'),
-                  onPressed: _working
-                      ? null
-                      : () => _perform(() => _fileManager
-                          .openDirectory(_controller.receiveDirectory!)),
-                  icon: const Icon(Icons.folder_open_outlined, size: 18),
-                  label: const Text('打开接收文件夹'),
-                )),
+  Widget _receivedCard(SharePage page) {
+    final records = _controller.receivedFilesFor(page);
+    final root = page.receiveDirectory ?? _controller.receiveDirectory;
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(22),
+        child:
+            Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+          Wrap(
+              alignment: WrapAlignment.spaceBetween,
+              spacing: 12,
+              runSpacing: 8,
+              children: [
+                const Text('来自手机的文件',
+                    style:
+                        TextStyle(fontSize: 18, fontWeight: FontWeight.w700)),
+                Text('${records.length} 个文件 · 历史记录',
+                    style: TextStyle(fontSize: 12, color: _colors.muted)),
               ]),
-            ],
-            const SizedBox(height: 20),
+          const SizedBox(height: 8),
+          Text('手机在分享网页中上传后，文件将自动保存到此设备，无需再次下载。',
+              style: TextStyle(color: _colors.muted, height: 1.6)),
+          if (root != null) ...[
+            const SizedBox(height: 18),
+            Container(
+              padding: const EdgeInsets.fromLTRB(12, 8, 4, 8),
+              decoration: BoxDecoration(
+                  color: _colors.background,
+                  borderRadius: BorderRadius.circular(12),
+                  border: Border.all(color: _colors.border)),
+              child: Row(children: [
+                Expanded(
+                    child: SelectableText('接收根目录：$root',
+                        style: TextStyle(
+                            fontSize: 12,
+                            color: _colors.muted,
+                            fontFamily: 'monospace',
+                            height: 1.6))),
+                ActionMotion(
+                    child: IconButton(
+                        tooltip: '复制接收目录',
+                        icon: const Icon(Icons.copy_outlined, size: 18),
+                        onPressed: () => _perform(() async => _copy(
+                            await _controller.receiveDirectoryFor(page),
+                            '本传输接收目录已复制')))),
+              ]),
+            ),
+            const SizedBox(height: 12),
+            Wrap(children: [
+              ActionMotion(
+                  child: OutlinedButton.icon(
+                key: const ValueKey('open-receive-directory'),
+                onPressed: _working
+                    ? null
+                    : () => _perform(() async => _fileManager.openDirectory(
+                        await _controller.receiveDirectoryFor(page))),
+                icon: const Icon(Icons.folder_open_outlined, size: 18),
+                label: const Text('打开接收文件夹'),
+              )),
+            ]),
+          ],
+          const SizedBox(height: 20),
+          const Divider(),
+          if (records.isEmpty)
+            Padding(
+              padding: EdgeInsets.symmetric(vertical: 46),
+              child: Column(children: [
+                Icon(Icons.move_to_inbox_outlined,
+                    size: 42, color: _colors.muted),
+                SizedBox(height: 16),
+                Text('还没有接收文件',
+                    style:
+                        TextStyle(fontWeight: FontWeight.w600, fontSize: 16)),
+                SizedBox(height: 8),
+                Text('手机扫码后可直接上传；本传输收到的文件会保存在这里。',
+                    style: TextStyle(color: _colors.muted, height: 1.6),
+                    textAlign: TextAlign.center),
+              ]),
+            ),
+          for (final file in records) ...[
+            Padding(
+              padding: const EdgeInsets.symmetric(vertical: 16),
+              child:
+                  Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                FileTypeIcon(name: file.name),
+                const SizedBox(width: 13),
+                Expanded(
+                    child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                      Text(file.name,
+                          maxLines: 2,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(fontWeight: FontWeight.w600)),
+                      const SizedBox(height: 5),
+                      Text(
+                          '${_sizeLabel(file.size)} · ${file.pageTitle} · ${_receivedDate(file.receivedAt)}',
+                          style: TextStyle(color: _colors.muted, fontSize: 12)),
+                      const SizedBox(height: 5),
+                      SelectableText(file.path,
+                          style: TextStyle(
+                              fontSize: 12,
+                              fontFamily: 'monospace',
+                              color: _colors.muted,
+                              height: 1.6)),
+                      const SizedBox(height: 12),
+                      Wrap(
+                          spacing: 8,
+                          runSpacing: 8,
+                          crossAxisAlignment: WrapCrossAlignment.center,
+                          children: [
+                            ActionMotion(
+                                child: OutlinedButton.icon(
+                              key: ValueKey('reveal-received-${file.path}'),
+                              onPressed: _working
+                                  ? null
+                                  : () => _perform(
+                                      () => _fileManager.revealFile(file.path)),
+                              icon: const Icon(Icons.drive_file_move_outlined,
+                                  size: 18),
+                              label: const Text('在文件夹中显示'),
+                            )),
+                            ActionMotion(
+                                child: IconButton(
+                              tooltip: '复制保存路径',
+                              icon: const Icon(Icons.copy_outlined, size: 18),
+                              onPressed: () => _copy(file.path, '文件路径已复制'),
+                            )),
+                          ]),
+                    ])),
+              ]),
+            ),
             const Divider(),
-            if (_controller.receivedFiles.isEmpty)
-              const Padding(
-                padding: EdgeInsets.symmetric(vertical: 46),
-                child: Column(children: [
-                  Icon(Icons.move_to_inbox_outlined,
-                      size: 42, color: AppTheme.muted),
-                  SizedBox(height: 16),
-                  Text('还没有接收文件',
-                      style:
-                          TextStyle(fontWeight: FontWeight.w600, fontSize: 16)),
-                  SizedBox(height: 8),
-                  Text('请保持对应传输页面运行，手机上传后会在这里留下记录。',
-                      style: TextStyle(color: AppTheme.muted, height: 1.6),
-                      textAlign: TextAlign.center),
-                ]),
-              ),
-            for (final file in _controller.receivedFiles) ...[
-              Padding(
-                padding: const EdgeInsets.symmetric(vertical: 16),
-                child: Row(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      FileTypeIcon(name: file.name),
-                      const SizedBox(width: 13),
-                      Expanded(
-                          child: Column(
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              children: [
-                            Text(file.name,
-                                maxLines: 2,
-                                overflow: TextOverflow.ellipsis,
-                                style: const TextStyle(
-                                    fontWeight: FontWeight.w600)),
-                            const SizedBox(height: 5),
-                            Text(
-                                '${_sizeLabel(file.size)} · ${file.pageTitle} · ${_receivedDate(file.receivedAt)}',
-                                style: const TextStyle(
-                                    color: AppTheme.muted, fontSize: 12)),
-                            const SizedBox(height: 5),
-                            SelectableText(file.path,
-                                style: const TextStyle(
-                                    fontSize: 12,
-                                    fontFamily: 'monospace',
-                                    color: AppTheme.muted,
-                                    height: 1.6)),
-                            const SizedBox(height: 12),
-                            Wrap(
-                                spacing: 8,
-                                runSpacing: 8,
-                                crossAxisAlignment: WrapCrossAlignment.center,
-                                children: [
-                                  ActionMotion(
-                                      child: OutlinedButton.icon(
-                                    key: ValueKey(
-                                        'reveal-received-${file.path}'),
-                                    onPressed: _working
-                                        ? null
-                                        : () => _perform(() =>
-                                            _fileManager.revealFile(file.path)),
-                                    icon: const Icon(
-                                        Icons.drive_file_move_outlined,
-                                        size: 18),
-                                    label: const Text('在文件夹中显示'),
-                                  )),
-                                  ActionMotion(
-                                      child: IconButton(
-                                    tooltip: '复制保存路径',
-                                    icon: const Icon(Icons.copy_outlined,
-                                        size: 18),
-                                    onPressed: () =>
-                                        _copy(file.path, '文件路径已复制'),
-                                  )),
-                                ]),
-                          ])),
-                    ]),
-              ),
-              const Divider(),
-            ],
-          ]),
-        ),
-      );
+          ],
+        ]),
+      ),
+    );
+  }
 
   Widget _emptyCard() => Card(
         child: Padding(
@@ -966,22 +1066,22 @@ class _HomeScreenState extends State<HomeScreen> {
             Container(
                 padding: const EdgeInsets.all(17),
                 decoration: BoxDecoration(
-                    color: AppTheme.primaryTint,
+                    color: _colors.primaryTint,
                     borderRadius: BorderRadius.circular(16)),
-                child: const Icon(Icons.folder_copy_outlined,
-                    size: 30, color: AppTheme.primary)),
+                child: Icon(Icons.folder_copy_outlined,
+                    size: 30, color: _colors.primary)),
             const SizedBox(height: 20),
-            const Text('还没有下载页',
+            const Text('还没有传输',
                 style: TextStyle(fontSize: 18, fontWeight: FontWeight.w600)),
             const SizedBox(height: 8),
-            const Text('新建页面、添加多个文件，然后启动分享。',
+            Text('点击「新建传输」，只需输入名称即可开始。',
                 textAlign: TextAlign.center,
-                style: TextStyle(color: AppTheme.muted, height: 1.6)),
+                style: TextStyle(color: _colors.muted, height: 1.6)),
             const SizedBox(height: 8),
-            const Text('文件保留在本机，停止页面即可结束分享。',
+            Text('文件稍后添加；手机也能先扫码传文件给电脑。',
                 textAlign: TextAlign.center,
-                style: TextStyle(
-                    color: AppTheme.muted, fontSize: 12, height: 1.6)),
+                style:
+                    TextStyle(color: _colors.muted, fontSize: 12, height: 1.6)),
           ]),
         ),
       );
@@ -1016,13 +1116,13 @@ class _HomeScreenState extends State<HomeScreen> {
                         _status(port == null ? '已停止' : '运行中 · 端口 $port',
                             active: port != null),
                         Text('${page.files.length} 个文件 · ${_sizeLabel(total)}',
-                            style: const TextStyle(
-                                color: AppTheme.muted, fontSize: 12)),
+                            style:
+                                TextStyle(color: _colors.muted, fontSize: 12)),
                       ]),
                 ])),
             ActionMotion(
                 child: IconButton(
-                    tooltip: '删除页面',
+                    tooltip: '删除传输',
                     onPressed: _working ? null : () => _deletePage(page),
                     icon: const Icon(Icons.delete_outline, size: 20))),
           ]),
@@ -1108,13 +1208,14 @@ class _HomeScreenState extends State<HomeScreen> {
 
   Widget _fileList(SharePage page) =>
       Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
-        Text('文件 (${page.files.length})',
+        Text('分享给手机 (${page.files.length})',
             style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 13)),
         const SizedBox(height: 12),
         if (page.files.isEmpty)
-          const Padding(
+          Padding(
               padding: EdgeInsets.symmetric(vertical: 28),
-              child: Text('尚未添加文件', style: TextStyle(color: AppTheme.muted))),
+              child: Text('还没有分享文件。添加文件后，手机网页会自动显示；手机现在也可以上传。',
+                  style: TextStyle(color: _colors.muted))),
         for (final file in page.files)
           Padding(
             padding: const EdgeInsets.symmetric(vertical: 8),
@@ -1138,11 +1239,9 @@ class _HomeScreenState extends State<HomeScreen> {
                       Text(file.relativePath!,
                           maxLines: 2,
                           overflow: TextOverflow.ellipsis,
-                          style: const TextStyle(
-                              fontSize: 11, color: AppTheme.muted)),
+                          style: TextStyle(fontSize: 11, color: _colors.muted)),
                     Text(_sizeLabel(file.size),
-                        style: const TextStyle(
-                            fontSize: 12, color: AppTheme.muted)),
+                        style: TextStyle(fontSize: 12, color: _colors.muted)),
                   ])),
               ActionMotion(
                   child: IconButton(
@@ -1168,27 +1267,27 @@ class _HomeScreenState extends State<HomeScreen> {
             decoration: BoxDecoration(
                 color: Colors.white,
                 borderRadius: BorderRadius.circular(12),
-                border: Border.all(color: AppTheme.border)),
+                border: Border.all(color: _colors.border)),
             child: QrImageView(
                 data: link,
                 version: QrVersions.auto,
                 size: 158,
-                semanticsLabel: '扫描二维码打开传输页面'),
+                semanticsLabel: '扫描二维码打开传输网页'),
           )),
           const SizedBox(height: 12),
           Container(
             decoration: BoxDecoration(
-                color: AppTheme.background,
+                color: _colors.background,
                 borderRadius: BorderRadius.circular(10),
-                border: Border.all(color: AppTheme.border)),
+                border: Border.all(color: _colors.border)),
             padding: const EdgeInsets.only(left: 10),
             child: Row(children: [
               Expanded(
                   child: SelectableText(link,
-                      style: const TextStyle(
+                      style: TextStyle(
                           fontFamily: 'monospace',
                           fontSize: 11,
-                          color: AppTheme.muted,
+                          color: _colors.muted,
                           height: 1.6))),
               ActionMotion(
                   child: IconButton(
@@ -1201,19 +1300,18 @@ class _HomeScreenState extends State<HomeScreen> {
           Container(
             padding: const EdgeInsets.all(18),
             decoration: BoxDecoration(
-                color: AppTheme.background,
+                color: _colors.background,
                 borderRadius: BorderRadius.circular(12)),
             child: Column(children: [
-              const Icon(Icons.qr_code_2_rounded,
-                  size: 50, color: AppTheme.muted),
+              Icon(Icons.qr_code_2_rounded, size: 50, color: _colors.muted),
               const SizedBox(height: 12),
               Text(
                   port == null
-                      ? '启动页面后显示二维码和下载链接。'
+                      ? '启动传输后显示二维码和下载链接。'
                       : '服务已启动；连接局域网后刷新地址以显示链接和二维码。',
                   textAlign: TextAlign.center,
-                  style: const TextStyle(
-                      color: AppTheme.muted, fontSize: 12, height: 1.7)),
+                  style: TextStyle(
+                      color: _colors.muted, fontSize: 12, height: 1.7)),
             ]),
           ),
       ]);

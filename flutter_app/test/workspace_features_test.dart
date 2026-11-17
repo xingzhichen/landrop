@@ -1,16 +1,28 @@
 // ignore_for_file: deprecated_member_use
+import 'dart:async';
+
+import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:landrop/app_theme.dart';
+import 'package:landrop/create_page_dialog.dart';
 import 'package:landrop/desktop_shell.dart';
 import 'package:landrop/landrop_controller.dart';
 import 'package:landrop/main.dart';
-import 'package:landrop/transfer_panel.dart';
+import 'package:landrop/theme_controller.dart';
 import 'package:landrop/workspace_dialogs.dart';
 import 'package:landrop/workspace_motion.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 const _existingId = '00000000-0000-4000-8000-000000000001';
+
+final class _PickedFile extends PlatformFile {
+  _PickedFile(this.name);
+  @override
+  final String name;
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
+}
 
 /// Only test-owned models are mutated. No sockets, filesystem or platform APIs.
 class _WorkspaceController extends LanDropController {
@@ -28,7 +40,17 @@ class _WorkspaceController extends LanDropController {
   final addedPaths = <({SharePage page, List<String> paths})>[];
   final receiveOptions =
       <({SharePage page, String? directory, bool organizeByDate})>[];
-  final cancelled = <String>[];
+  final fileSelections = <List<PlatformFile>>[];
+
+  @override
+  Future<String> receiveDirectoryFor(SharePage page) async =>
+      page.receiveDirectory ?? "/downloads/${page.id}";
+
+  @override
+  Future<void> addFiles(SharePage page, List<PlatformFile> selections) async {
+    fileSelections.add(List.of(selections));
+    await addPaths(page, selections.map((file) => file.name).toList());
+  }
 
   @override
   Future<void> initialize() async {
@@ -88,19 +110,6 @@ class _WorkspaceController extends LanDropController {
     page.organizeByDate = organizeByDate;
     notifyListeners();
   }
-
-  @override
-  Future<void> cancelTransfer(String id) async {
-    cancelled.add(id);
-    transfers.firstWhere((task) => task.id == id).status = 'cancelled';
-    notifyListeners();
-  }
-
-  void advance(TransferTask task, int bytes) {
-    task.transferredBytes = bytes;
-    task.bytesPerSecond = 128;
-    notifyListeners();
-  }
 }
 
 class _WorkspaceShell extends DesktopShell {
@@ -152,6 +161,8 @@ Future<_Fixture> _mount(
   _WorkspaceController? controller,
   Future<String?> Function()? pickDirectory,
   bool reduceMotion = false,
+  Future<List<PlatformFile>> Function()? pickFiles,
+  ThemeController? appearance,
 }) async {
   tester.view.physicalSize = Size(width, 1100);
   tester.view.devicePixelRatio = 1;
@@ -163,18 +174,22 @@ Future<_Fixture> _mount(
     await tester.pumpWidget(const SizedBox.shrink());
     model.dispose();
   });
-  await tester.pumpWidget(MaterialApp(
-    theme: AppTheme.light,
-    builder: (context, child) => MediaQuery(
-      data: MediaQuery.of(context).copyWith(disableAnimations: reduceMotion),
-      child: child!,
-    ),
-    home: HomeScreen(
-      controller: model,
-      shell: shell,
-      pickFiles: () async => [],
-      pickDirectory: pickDirectory ?? () async => null,
-    ),
+  final theme = appearance ?? ThemeController();
+  if (appearance == null) addTearDown(theme.dispose);
+  await tester.pumpWidget(LanDropApp(
+    appearance: theme,
+    home: Builder(
+        builder: (context) => MediaQuery(
+              data: MediaQuery.of(context)
+                  .copyWith(disableAnimations: reduceMotion),
+              child: HomeScreen(
+                controller: model,
+                shell: shell,
+                appearance: theme,
+                pickFiles: pickFiles ?? () async => [],
+                pickDirectory: pickDirectory ?? () async => null,
+              ),
+            )),
   ));
   await tester.pumpAndSettle();
   expect(shell.drop, isNotNull);
@@ -184,6 +199,7 @@ Future<_Fixture> _mount(
 
 Future<void> _tap(WidgetTester tester, Finder finder) async {
   await tester.ensureVisible(finder);
+  await tester.pumpAndSettle();
   await tester.tap(finder);
   await tester.pumpAndSettle();
 }
@@ -288,21 +304,20 @@ void main() {
   });
 
   testWidgets(
-      'share folder picker cancellation is inert and a folder uses the import flow',
+      'detail folder cancellation is inert and retry adds to selected transfer',
       (tester) async {
     var picks = 0;
     final fixture = await _mount(tester,
         pickDirectory: () async => ++picks == 1 ? null : '/chosen/项目资料');
-    await _tap(tester, find.text('分享文件夹'));
-    expect(find.byType(ImportPathsDialog), findsNothing);
+    await _tap(
+        tester, find.byKey(const ValueKey('open-transfer-$_existingId')));
+    await _tap(tester, find.text('添加文件夹'));
     expect(fixture.controller.events, isEmpty);
-    await _tap(tester, find.text('分享文件夹'));
-    expect(find.byType(ImportPathsDialog), findsOneWidget);
-    await _tap(tester, find.byKey(const ValueKey('confirm-import-paths')));
-    expect(picks, 2);
+    await _tap(tester, find.text('添加文件夹'));
+    expect(find.byType(ImportPathsDialog), findsNothing);
     expect(fixture.controller.addedPaths.single.paths, ['/chosen/项目资料']);
-    expect(
-        fixture.controller.events, ['create:项目资料', 'add:项目资料', 'start:项目资料']);
+    expect(fixture.controller.events, ['add:已有页面']);
+    expect(fixture.controller.pages, hasLength(1));
   });
 
   testWidgets(
@@ -355,43 +370,6 @@ void main() {
   });
 
   testWidgets(
-      'transfer panel displays live model bytes, speed, ETA and invokes cancellation',
-      (tester) async {
-    final controller = _WorkspaceController();
-    final task = TransferTask(
-        id: 'live-transfer',
-        pageId: _existingId,
-        pageTitle: '已有页面',
-        name: '正在接收.bin',
-        direction: 'upload',
-        totalBytes: 1024,
-        transferredBytes: 256)
-      ..bytesPerSecond = 128;
-    controller.transfers.add(task);
-    await _mount(tester, controller: controller);
-    await _navigate(tester, '传输动态');
-    expect(find.byType(TransferPanel), findsOneWidget);
-    expect(find.text('256 B / 1.0 KB'), findsOneWidget);
-    expect(find.text('128 B/s · 约 6 秒'), findsOneWidget);
-    Finder progress() => find.byWidgetPredicate((widget) =>
-        widget is LinearProgressIndicator &&
-        widget.semanticsLabel == '正在接收.bin传输进度');
-    expect(tester.widget<LinearProgressIndicator>(progress()).value, .25);
-    controller.advance(task, 768);
-    await tester.pumpAndSettle();
-    expect(tester.widget<LinearProgressIndicator>(progress()).value, .75);
-    expect(find.text('768 B / 1.0 KB'), findsOneWidget);
-    expect(find.text('128 B/s · 约 2 秒'), findsOneWidget);
-    await _tap(
-        tester, find.byKey(const ValueKey('cancel-transfer-live-transfer')));
-    expect(controller.cancelled, ['live-transfer']);
-    expect(find.text('已取消'), findsOneWidget);
-    expect(find.byKey(const ValueKey('cancel-transfer-live-transfer')),
-        findsNothing);
-    expect(tester.takeException(), isNull);
-  });
-
-  testWidgets(
       'settings persist background mode and quit requires explicit confirmation',
       (tester) async {
     final fixture = await _mount(tester);
@@ -433,39 +411,204 @@ void main() {
         isFalse);
   });
 
-  for (final width in [1440.0, 390.0]) {
+  for (final width in [1440.0, 1024.0, 820.0, 680.0, 390.0]) {
     testWidgets(
-        'all four navigation destinations render without overflow at $width',
+        'two navigation destinations and detail do not overflow at $width',
         (tester) async {
-      final controller = _WorkspaceController();
-      controller.transfers.add(TransferTask(
-          id: 'responsive-task',
-          pageId: _existingId,
-          pageTitle: '已有页面',
-          name: '跨设备的文件传输.zip',
-          direction: 'download',
-          totalBytes: 4096,
-          transferredBytes: 1024));
-      final fixture =
-          await _mount(tester, width: width, controller: controller);
-      for (final title in ['传输页面', '接收记录', '传输动态', '应用设置']) {
+      await _mount(tester, width: width);
+      expect(find.text('接收记录'), findsNothing);
+      expect(find.text('传输动态'), findsNothing);
+      await _tap(
+          tester, find.byKey(const ValueKey('open-transfer-$_existingId')));
+      expect(find.text('来自手机的文件'), findsOneWidget);
+      expect(tester.takeException(), isNull);
+      await _tap(tester, find.byKey(const ValueKey('back-to-transfers')));
+      for (final title in ['应用设置', '我的传输']) {
         await _navigate(tester, title);
         expect(find.text('工作台  /  $title'), findsOneWidget);
         expect(tester.takeException(), isNull, reason: '$width / $title');
-        await tester.drag(find.byType(ListView).first, const Offset(0, -600));
-        await tester.pumpAndSettle();
-        expect(tester.takeException(), isNull,
-            reason: '$width / $title scrolled');
       }
-      expect(fixture.shell.quitCalls, 0);
     });
   }
+
+  testWidgets('name-only creation starts empty transfer and opens its detail',
+      (tester) async {
+    var pickerCalls = 0;
+    final fixture = await _mount(tester, pickFiles: () async {
+      pickerCalls++;
+      return [];
+    });
+    await _tap(tester, find.byKey(const ValueKey('new-transfer')));
+    await tester.enterText(
+        find.byKey(CreatePageDialog.titleFieldKey), '  空传输  ');
+    await _tap(tester, find.byKey(CreatePageDialog.submitKey));
+    expect(fixture.controller.events, ['create:空传输', 'start:空传输']);
+    expect(pickerCalls, 0);
+    expect(fixture.controller.pages.last.files, isEmpty);
+    expect(fixture.controller.pages.last.running, isTrue);
+    expect(find.byKey(const ValueKey('back-to-transfers')), findsOneWidget);
+    expect(find.text('还没有接收文件'), findsOneWidget);
+    expect(find.text('添加文件'), findsOneWidget);
+  });
+
+  testWidgets(
+      'same-title transfers isolate share files and receipts after back navigation',
+      (tester) async {
+    final model = _WorkspaceController();
+    final first = model.pages.single;
+    final second = SharePage(
+        id: 'second',
+        title: first.title,
+        files: [
+          const SharedFile(
+              id: 'second-file',
+              name: '第二组分享.txt',
+              path: '/second.txt',
+              size: 1,
+              managed: false),
+        ],
+        running: true);
+    model.pages.add(second);
+    for (final page in model.pages) {
+      model.receivedFiles.add(ReceivedFile(
+          name: '${page.id}.jpg',
+          path: '/saved/${page.id}.jpg',
+          size: 42,
+          pageId: page.id,
+          pageTitle: page.title,
+          receivedAt: DateTime(2026, 11, 17)));
+    }
+    await _mount(tester, controller: model);
+    await _tap(tester, find.byKey(ValueKey('open-transfer-${first.id}')));
+    expect(find.text('${first.id}.jpg'), findsOneWidget);
+    expect(find.text('${second.id}.jpg'), findsNothing);
+    expect(find.text('第二组分享.txt'), findsNothing);
+    await _tap(tester, find.byKey(const ValueKey('back-to-transfers')));
+    await _tap(tester, find.byKey(ValueKey('open-transfer-${second.id}')));
+    expect(find.text('${second.id}.jpg'), findsOneWidget);
+    expect(find.text('${first.id}.jpg'), findsNothing);
+    expect(find.text('第二组分享.txt'), findsOneWidget);
+  });
+
+  testWidgets('drop in detail directly appends only to the selected transfer',
+      (tester) async {
+    final fixture = await _mount(tester);
+    await _tap(
+        tester, find.byKey(const ValueKey('open-transfer-$_existingId')));
+    fixture.shell.drop!(['/drop/detail.txt']);
+    await tester.pumpAndSettle();
+    expect(find.byType(ImportPathsDialog), findsNothing);
+    expect(fixture.controller.events, ['add:已有页面']);
+    expect(fixture.controller.addedPaths.single.page.id, _existingId);
+    expect(find.text('detail.txt'), findsOneWidget);
+  });
+
+  testWidgets(
+      'file picker cancel, error and retry keep existing transfer intact',
+      (tester) async {
+    var calls = 0;
+    final fixture = await _mount(tester, pickFiles: () async {
+      switch (++calls) {
+        case 1:
+          return [];
+        case 2:
+          throw PlatformException(code: 'ENTITLEMENT_NOT_FOUND');
+        default:
+          return [_PickedFile('重试成功.txt')];
+      }
+    });
+    await _tap(
+        tester, find.byKey(const ValueKey('open-transfer-$_existingId')));
+    await _tap(tester, find.text('添加文件'));
+    expect(fixture.controller.fileSelections, isEmpty);
+    await _tap(tester, find.text('添加文件'));
+    expect(find.textContaining('ENTITLEMENT_NOT_FOUND'), findsOneWidget);
+    expect(fixture.controller.pages.single.files, isEmpty);
+    await _tap(tester, find.text('添加文件'));
+    expect(calls, 3);
+    expect(fixture.controller.fileSelections.single.single.name, '重试成功.txt');
+    expect(find.text('重试成功.txt'), findsOneWidget);
+  });
+
+  testWidgets('pending file picker blocks stale and repeated add actions',
+      (tester) async {
+    final pending = Completer<List<PlatformFile>>();
+    var calls = 0;
+    final fixture = await _mount(tester, pickFiles: () {
+      calls++;
+      return pending.future;
+    });
+    await _tap(
+        tester, find.byKey(const ValueKey('open-transfer-$_existingId')));
+    final button = find.widgetWithText(OutlinedButton, '添加文件');
+    final stale = tester.widget<OutlinedButton>(button).onPressed!;
+    stale();
+    stale();
+    await tester.pump();
+    expect(calls, 1);
+    expect(tester.widget<OutlinedButton>(button).onPressed, isNull);
+    expect(
+        tester
+            .widget<OutlinedButton>(
+                find.widgetWithText(OutlinedButton, '添加文件夹'))
+            .onPressed,
+        isNull);
+    expect(
+        tester
+            .widget<FilledButton>(find.byKey(const ValueKey('new-transfer')))
+            .onPressed,
+        isNull);
+    expect(fixture.controller.fileSelections, isEmpty);
+    pending.complete([_PickedFile('单次添加.txt')]);
+    await tester.pumpAndSettle();
+    expect(fixture.controller.fileSelections, hasLength(1));
+    expect(tester.widget<OutlinedButton>(button).onPressed, isNotNull);
+  });
+
+  testWidgets(
+      'real LanDropApp persists all appearance choices and follows live system brightness',
+      (tester) async {
+    tester.platformDispatcher.platformBrightnessTestValue = Brightness.light;
+    addTearDown(tester.platformDispatcher.clearPlatformBrightnessTestValue);
+    final theme = ThemeController();
+    addTearDown(theme.dispose);
+    await _mount(tester, appearance: theme);
+    await _navigate(tester, '应用设置');
+    Brightness brightness() =>
+        Theme.of(tester.element(find.byType(HomeScreen))).brightness;
+    for (final mode in [ThemeMode.dark, ThemeMode.light, ThemeMode.system]) {
+      await _tap(tester, find.byKey(ValueKey('theme-${mode.name}')));
+      expect(theme.mode, mode);
+      expect(
+          tester
+              .widget<ChoiceChip>(find.byKey(ValueKey('theme-${mode.name}')))
+              .selected,
+          isTrue);
+      expect(
+          (await SharedPreferences.getInstance())
+              .getString(ThemeController.preferenceKey),
+          mode.name);
+      expect(brightness(),
+          mode == ThemeMode.dark ? Brightness.dark : Brightness.light);
+    }
+    tester.platformDispatcher.platformBrightnessTestValue = Brightness.dark;
+    await tester.pumpAndSettle();
+    expect(brightness(), Brightness.dark);
+    expect(theme.mode, ThemeMode.system);
+    tester.platformDispatcher.platformBrightnessTestValue = Brightness.light;
+    await tester.pumpAndSettle();
+    expect(brightness(), Brightness.light);
+    expect(
+        (await SharedPreferences.getInstance())
+            .getString(ThemeController.preferenceKey),
+        'system');
+  });
 
   testWidgets(
       'reduced-motion content is visible immediately without an entry opacity tween',
       (tester) async {
     await _mount(tester, reduceMotion: true);
-    final pageEntry = find.byKey(const ValueKey(_existingId));
+    final pageEntry = find.byKey(const ValueKey("open-transfer-$_existingId"));
     expect(pageEntry, findsOneWidget);
     expect(find.descendant(of: pageEntry, matching: find.byType(Opacity)),
         findsNothing);
