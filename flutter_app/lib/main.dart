@@ -9,6 +9,7 @@ import 'package:flutter/services.dart';
 import 'package:qr_flutter/qr_flutter.dart';
 
 import 'landrop_controller.dart';
+import 'create_page_dialog.dart';
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
@@ -87,90 +88,21 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   Future<void> _newPage() async {
-    final input = TextEditingController();
-    var selections = <PlatformFile>[];
-    try {
-      final created = await showDialog<(String, List<PlatformFile>)>(
-        context: context,
-        builder: (dialogContext) => StatefulBuilder(
-          builder: (dialogContext, setDialogState) => AlertDialog(
-            title: const Text('新建传输页面'),
-            content: SizedBox(
-              width: 430,
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  TextField(
-                    controller: input,
-                    autofocus: true,
-                    maxLength: 80,
-                    onChanged: (_) => setDialogState(() {}),
-                    decoration: const InputDecoration(
-                      labelText: '页面名称',
-                      hintText: '例如：旅行照片',
-                      border: OutlineInputBorder(),
-                    ),
-                  ),
-                  const SizedBox(height: 12),
-                  OutlinedButton.icon(
-                    onPressed: () async {
-                      final result = await FilePicker.pickFiles();
-                      if (dialogContext.mounted && result.isNotEmpty) {
-                        setDialogState(() => selections = result);
-                      }
-                    },
-                    icon: const Icon(Icons.folder_open_outlined),
-                    label: const Text('选择文件（可多选）'),
-                  ),
-                  const SizedBox(height: 10),
-                  Text('已选择 ${selections.length} 个文件',
-                      style: Theme.of(dialogContext).textTheme.bodySmall),
-                  if (selections.isNotEmpty)
-                    SizedBox(
-                      height: 110,
-                      child: ListView.builder(
-                        itemCount: selections.length,
-                        itemBuilder: (_, index) => Text(
-                          selections[index].name,
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                        ),
-                      ),
-                    ),
-                ],
-              ),
-            ),
-            actions: [
-              TextButton(
-                onPressed: () => Navigator.pop(dialogContext),
-                child: const Text('取消'),
-              ),
-              FilledButton(
-                onPressed: input.text.trim().isEmpty || selections.isEmpty
-                    ? null
-                    : () => Navigator.pop(dialogContext,
-                        (input.text.trim(), List<PlatformFile>.of(selections))),
-                child: const Text('创建并启动'),
-              ),
-            ],
-          ),
-        ),
-      );
-      if (created == null || !mounted) return;
-      await _perform(() async {
-        final page = await _controller.createPage(created.$1);
-        try {
-          await _controller.addFiles(page, created.$2);
-          await _controller.start(page);
-        } catch (_) {
-          await _controller.removePage(page);
-          rethrow;
-        }
-      });
-    } finally {
-      input.dispose();
-    }
+    final created = await showDialog<(String, List<PlatformFile>)>(
+      context: context,
+      builder: (_) => CreatePageDialog(pickFiles: FilePicker.pickFiles),
+    );
+    if (created == null || !mounted) return;
+    await _perform(() async {
+      final page = await _controller.createPage(created.$1);
+      try {
+        await _controller.addFiles(page, created.$2);
+        await _controller.start(page);
+      } catch (_) {
+        await _controller.removePage(page);
+        rethrow;
+      }
+    });
   }
 
   Future<void> _addFiles(SharePage page) async {

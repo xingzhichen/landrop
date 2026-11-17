@@ -28,6 +28,8 @@ flutter run -d ios           # iOS（在 macOS 上，需 Xcode 与签名）
 
 发布构建：`flutter build macos --release`、`flutter build windows --release`、`flutter build apk --release`、`flutter build ios --release`。Android/iOS 真机安装需要各自的签名配置；iOS 的分发通常需要 Apple Developer 账号。首次联网时请允许本地网络权限，部分手机系统可能限制应用退到后台后的文件服务。
 
+macOS 构建后请使用 `bash tool/package_macos.sh` 打包。该脚本显式保留文件选择权限并验证最终签名；不要直接用不带 entitlements 的签名命令替换应用签名，否则原生文件选择器可能拒绝弹出。新建弹窗会显示选择器错误并支持重试。
+
 ### 自动构建
 
 每次向 `master` 推送，GitHub Actions 的 `Build desktop apps` 工作流在 GitHub 托管的 macOS 和 Windows runner 上分别运行分析、测试、发布构建，并上传 `LanDrop-macOS.zip` / `LanDrop-Windows.zip` 到该次 Actions 运行的 Artifacts。也可手动触发。**这是可下载构建产物，不是已公证、已签名的正式安装包**；面向公众分发需要另行配置签名证书、macOS 公证或 Windows 代码签名。

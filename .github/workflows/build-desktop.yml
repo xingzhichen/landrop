@@ -41,10 +41,7 @@ jobs:
         run: flutter build ${{ matrix.target }} --release
       - name: Sign and package macOS application
         if: matrix.target == 'macos'
-        run: |
-          codesign --force --deep --sign - build/macos/Build/Products/Release/LanDrop.app
-          codesign --verify --deep --strict build/macos/Build/Products/Release/LanDrop.app
-          ditto -c -k --sequesterRsrc --keepParent build/macos/Build/Products/Release/LanDrop.app build/LanDrop-macOS.zip
+        run: bash tool/package_macos.sh
       - name: Package Windows application
         if: matrix.target == 'windows'
         shell: pwsh
