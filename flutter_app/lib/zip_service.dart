@@ -1,37 +1,77 @@
 import 'dart:io';
 import 'dart:isolate';
+import 'dart:typed_data';
 
 import 'package:archive/archive_io.dart';
 
-/// Builds a ZIP on a worker isolate. archive's file encoder uses streamed
-/// entries and disk-backed input/output, not readAsBytes or an in-memory ZIP.
-/// STORE avoids redundant recompression of media and supports ZIP64 archives.
-/// Entry names have already been whitelisted/uniquified by the controller.
+/// Cancellation is checked at the native read boundary, including archive's
+/// CRC pass. A marker works while this worker is busy in synchronous encoding;
+/// a ReceivePort message alone cannot interrupt a synchronous multi-GiB entry.
+class _CancellableFileHandle extends FileHandle {
+  _CancellableFileHandle(super.path, this.cancellation);
+  final File cancellation;
+
+  @override
+  int readInto(Uint8List buffer, [int? length]) {
+    if (cancellation.existsSync()) throw const _ZipCancelled();
+    return super.readInto(buffer, length);
+  }
+}
+
+class _ZipCancelled implements Exception {
+  const _ZipCancelled();
+  @override
+  String toString() => 'ZIP cancelled';
+}
+
+/// Builds a streamed, disk-backed STORE ZIP (including ZIP64) off the UI isolate.
+/// args: result port, output path, whitelisted [source, name] entries, cancel path,
+/// and optionally an observer port used by handle-lifecycle integration tests.
+/// The result is sent only AFTER every native input/output handle is closed.
+/// The owner must also await the isolate's onExit before removing its directory.
 void buildZipWorker(List<Object> arguments) {
   final port = arguments[0] as SendPort;
   final destination = arguments[1] as String;
   final entries = arguments[2] as List<List<String>>;
-  ZipFileEncoder? encoder;
+  final cancellation = File(arguments[3] as String);
+  final observer = arguments.length > 4 ? arguments[4] as SendPort : null;
+  OutputFileStream? output;
+  String? error;
   try {
-    encoder = ZipFileEncoder()
-      ..create(destination, level: ZipFileEncoder.store);
+    if (cancellation.existsSync()) throw const _ZipCancelled();
+    output = OutputFileStream(destination);
+    final encoder = ZipEncoder(streamed: true)..startEncode(output, level: 0);
     for (final entry in entries) {
-      // Recheck on the worker immediately before opening the file.
+      if (cancellation.existsSync()) throw const _ZipCancelled();
       if (FileSystemEntity.typeSync(entry[0], followLinks: false) !=
           FileSystemEntityType.file) {
         throw const FileSystemException('Unsafe archive source');
       }
-      encoder.addFileSync(File(entry[0]), entry[1], ZipFileEncoder.store);
+      final handle = _CancellableFileHandle(entry[0], cancellation);
+      try {
+        // FileBuffer performs its first native read in this constructor. Keep
+        // the handle in scope even if cancellation interrupts construction.
+        final input = InputFileStream.withFileHandle(handle);
+        observer?.send('opened');
+        final file = ArchiveFile.stream(entry[1], input)
+          ..compression = CompressionType.none;
+        encoder.add(file, level: 0);
+      } finally {
+        // Never kill the isolate: kill bypasses this finally on Windows and
+        // leaves the source locked until a later VM finalizer/GC cycle.
+        handle.closeSync();
+      }
     }
-    encoder.closeSync();
-    encoder = null;
-    port.send(null);
-  } catch (error) {
+    if (cancellation.existsSync()) throw const _ZipCancelled();
+    encoder.endEncode();
+  } catch (failure) {
+    error = failure.toString();
+  } finally {
     try {
-      encoder?.closeSync();
-    } catch (_) {
-      // Report the original read/encode error, not a partial-archive close error.
+      output?.closeSync();
+    } catch (failure) {
+      error ??= failure.toString();
     }
-    port.send(error.toString());
   }
+  port.send({'error': error});
 }

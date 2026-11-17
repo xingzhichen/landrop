@@ -1,9 +1,12 @@
 import 'dart:convert';
 import 'dart:io';
+import 'dart:isolate';
 
 import 'package:archive/archive.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:landrop/landrop_controller.dart';
+import 'package:landrop/zip_service.dart';
+import 'package:path/path.dart' as p;
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'controller_test.dart' show deleteTestDirectory, upload;
@@ -295,14 +298,15 @@ void main() {
   test(
       'custom receive options, raw records persist and inline MIME is whitelist only',
       () async {
-    final base = '${directory.path}/custom';
+    final base = p.join(directory.path, 'custom');
     await controller.setReceiveOptions(page,
         directory: base, organizeByDate: true);
     final target = await controller.receiveDirectoryFor(page);
-    expect(target, startsWith('$base/${page.id}/'));
-    expect(controller.receiveDirectory, '${directory.path}/LanDrop');
+    expect(p.dirname(target), p.join(base, page.id));
+    expect(p.basename(target), matches(RegExp(r'^\d{4}-\d{2}-\d{2}$')));
+    expect(controller.receiveDirectory, p.join(directory.path, 'LanDrop'));
     expect((await upload(port, 'photo.png', 'image')).$1, 201);
-    expect(controller.receivedFiles.single.path, '$target/photo.png');
+    expect(controller.receivedFiles.single.path, p.join(target, 'photo.png'));
     await controller.addPaths(page, [controller.receivedFiles.single.path]);
     final image =
         await request(port, 'GET', '/file/${page.files.single.id}?inline=1');
@@ -322,7 +326,7 @@ void main() {
     await controller.initialize();
     expect(controller.pages.single.receiveDirectory, base);
     expect(controller.pages.single.organizeByDate, true);
-    expect(controller.receivedFiles.single.path, '$target/photo.png');
+    expect(controller.receivedFiles.single.path, p.join(target, 'photo.png'));
   });
 
   test('all session mutations enforce origin, session count is bounded',
@@ -401,6 +405,75 @@ void main() {
     await controller.cancelTransfer(task.id);
     expect((await pending).status, 400);
     expect(task.status, 'cancelled');
+  });
+
+  test('ZIP worker cancellation closes native source and output before exit',
+      () async {
+    final source = File(p.join(directory.path, 'worker-source.bin'));
+    final output = File(p.join(directory.path, 'worker-output.zip'));
+    final cancellation = File(p.join(directory.path, 'worker-cancel'));
+    final handle = await source.open(mode: FileMode.write);
+    await handle.truncate(512 * 1024 * 1024);
+    await handle.close();
+    final messages = ReceivePort();
+    final observer = ReceivePort();
+    final exits = ReceivePort();
+    final result = messages.first;
+    final opened = observer.first;
+    final exited = exits.first;
+    await Isolate.spawn(
+        buildZipWorker,
+        <Object>[
+          messages.sendPort,
+          output.path,
+          [
+            [source.path, 'source.bin']
+          ],
+          cancellation.path,
+          observer.sendPort,
+        ],
+        onExit: exits.sendPort);
+    try {
+      expect(await opened, 'opened');
+      await cancellation.create();
+      final reply = await result as Map;
+      expect(reply['error'], contains('cancelled'));
+      await exited;
+      // A separate OS process observes the actual native-handle lifetime, not
+      // just Dart task status. Windows refuses FileShare.None if a handle leaks;
+      // macOS permits unlinking open files, so query its native descriptor table.
+      if (Platform.isMacOS) {
+        final check = await Process.run(
+            '/usr/sbin/lsof', ['-t', '--', source.path, output.path]);
+        expect(check.exitCode, 1,
+            reason: 'Leaked ZIP handles: ${check.stdout} ${check.stderr}');
+      } else if (Platform.isWindows) {
+        final check = await Process.run('powershell.exe', [
+          '-NoProfile',
+          '-NonInteractive',
+          '-Command',
+          r'$ErrorActionPreference="Stop"; foreach($p in @($env:LANDROP_SOURCE,$env:LANDROP_OUTPUT)) { $h=[System.IO.File]::Open($p,[System.IO.FileMode]::Open,[System.IO.FileAccess]::ReadWrite,[System.IO.FileShare]::None); $h.Dispose() }'
+        ], environment: {
+          'LANDROP_SOURCE': source.path,
+          'LANDROP_OUTPUT': output.path
+        });
+        expect(check.exitCode, 0, reason: '${check.stdout} ${check.stderr}');
+      }
+      final renamed =
+          await source.rename(p.join(directory.path, 'worker-renamed.bin'));
+      expect(await renamed.exists(), true);
+      // Verified fixed test-owned output: native handles must already be closed.
+      expect(output.path, p.join(directory.path, 'worker-output.zip'));
+      await output.delete();
+      expect(await output.exists(), false);
+    } finally {
+      // Also release a worker after a failed assertion; do not abandon its files.
+      await cancellation.create();
+      await exited;
+      messages.close();
+      observer.close();
+      exits.close();
+    }
   });
 
   test('file validators preserve Range only for a matching If-Range', () async {

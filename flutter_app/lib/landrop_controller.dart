@@ -1745,25 +1745,49 @@ class LanDropController extends ChangeNotifier {
     final archive = File(p.join(temporary.path, 'download.zip'));
     final task = _newTask(page, '${page.title}.zip', 'download', 0);
     final port = ReceivePort();
-    Isolate? isolate;
+    final exited = Completer<void>();
+    final result = Completer<Object?>();
+    final finished = Completer<void>();
+    final cancellation = File(p.join(temporary.path, 'cancel'));
+    var spawned = false;
+    final messages = port.listen((message) {
+      if (message == null) {
+        if (!exited.isCompleted) exited.complete();
+        if (!result.isCompleted) {
+          result.complete('ZIP worker exited without a result');
+        }
+      } else if (message is Map) {
+        if (!result.isCompleted) result.complete(message['error']);
+      } else {
+        // Uncaught worker errors are delivered as [error, stack].
+        if (!result.isCompleted) result.complete(message.toString());
+      }
+    });
     var cancelled = false;
     final cancel = Completer<void>();
     _cancelActions[task.id] = () async {
       cancelled = true;
       task.status = 'cancelled';
-      isolate?.kill(priority: Isolate.immediate);
+      // Cooperative cancellation preserves the worker's finally blocks. Waiting
+      // for request cleanup makes cancelTransfer a real resource-release barrier.
+      await cancellation.create();
       if (!cancel.isCompleted) cancel.complete();
+      await finished.future;
     };
     try {
-      isolate = await Isolate.spawn(
-          buildZipWorker, <Object>[port.sendPort, archive.path, entries]);
-      if (cancelled) isolate.kill(priority: Isolate.immediate);
-      final result = await Future.any<Object?>([port.first, cancel.future]);
+      await Isolate.spawn(buildZipWorker,
+          <Object>[port.sendPort, archive.path, entries, cancellation.path],
+          onExit: port.sendPort, onError: port.sendPort, errorsAreFatal: true);
+      spawned = true;
+      final failure = await Future.any<Object?>([result.future, cancel.future]);
       if (cancelled) {
         await _closeAfterError(request.response, 400);
         return;
       }
-      if (result != null) throw FileSystemException('$result');
+      if (failure != null) throw FileSystemException('$failure');
+      // The result confirms explicit close; onExit additionally confirms the
+      // isolate cannot reopen a file while the owner streams/deletes the ZIP.
+      await exited.future;
       final length = await archive.length();
       request.response.headers.set('Content-Type', 'application/zip');
       request.response.headers.set(HttpHeaders.acceptRangesHeader, 'none');
@@ -1777,15 +1801,20 @@ class LanDropController extends ChangeNotifier {
       if (!cancelled) task.status = 'failed';
       await _closeAfterError(request.response, 500);
     } finally {
-      isolate?.kill(priority: Isolate.immediate);
-      port.close();
-      _cancelActions.remove(task.id);
-      // Fixed system-generated temp directory, never a request-derived path.
-      if (p.basename(temporary.path).startsWith('landrop-zip-') &&
-          p.isWithin(Directory.systemTemp.path, temporary.path)) {
-        await temporary.delete(recursive: true);
+      try {
+        if (spawned) await exited.future;
+        await messages.cancel();
+        port.close();
+        _cancelActions.remove(task.id);
+        // Fixed system-generated temp directory, never a request-derived path.
+        if (p.basename(temporary.path).startsWith('landrop-zip-') &&
+            p.isWithin(Directory.systemTemp.path, temporary.path)) {
+          await temporary.delete(recursive: true);
+        }
+        notifyListeners();
+      } finally {
+        if (!finished.isCompleted) finished.complete();
       }
-      notifyListeners();
     }
   }
 
