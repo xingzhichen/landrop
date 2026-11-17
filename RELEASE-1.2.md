@@ -31,6 +31,8 @@ GATE: OFF (no build active)
 - Mac release 明确以生产入口构建（不是 smoke entrypoint），打包脚本验证文件选择权限与最终签名。
 - Windows 原生运行/Explorer拖放、手机 Safari/Chrome 真机系统挂起场景未在本机实测；Windows 编译与测试交 GitHub Actions，不能把静态审查当作实机通过。
 
+最终跨平台CI：[44091260031](https://github.com/xingzhichen/landrop/actions/runs/44091260031)，对应运行代码提交 `9e17eb3`。**macOS / Windows 两个job均成功**，均完成 analyze、73项测试、Release构建、完整打包与产物上传。本地Mac成品已提取验证签名，Windows成品已检查ZIP CRC、EXE、DLL及Flutter资源；这仍不等于Windows图形界面实机验收。
+
 ## 网页视觉、可访问性与性能
 
 沿用原有 `software` 任务页：cool-grey-cobalt，系统 sans/mono 回退；不新增营销 hero、照片、shader、scene 或装饰循环。Voice card：事实型工具、中文动作、真实进度、明确错误与续传边界。没有虚构客户、数据、价格、新造品牌、外链素材、客户待补插槽或 `.example` 表单；canonical/share海报不适用于每台电脑的临时LAN地址。
