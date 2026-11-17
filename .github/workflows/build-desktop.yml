@@ -1,0 +1,65 @@
+name: Build desktop apps
+
+on:
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: ${{ matrix.platform }} release
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: macOS
+            runner: macos-latest
+            target: macos
+          - platform: Windows
+            runner: windows-latest
+            target: windows
+    runs-on: ${{ matrix.runner }}
+    defaults:
+      run:
+        working-directory: flutter_app
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+      - name: Install dependencies
+        run: flutter pub get
+      - name: Analyze source
+        run: flutter analyze
+      - name: Run tests
+        run: flutter test
+      - name: Build release
+        run: flutter build ${{ matrix.target }} --release
+      - name: Sign and package macOS application
+        if: matrix.target == 'macos'
+        run: |
+          codesign --force --deep --sign - build/macos/Build/Products/Release/LanDrop.app
+          codesign --verify --deep --strict build/macos/Build/Products/Release/LanDrop.app
+          ditto -c -k --sequesterRsrc --keepParent build/macos/Build/Products/Release/LanDrop.app build/LanDrop-macOS.zip
+      - name: Package Windows application
+        if: matrix.target == 'windows'
+        shell: pwsh
+        run: Compress-Archive -Path build/windows/x64/runner/Release/* -DestinationPath build/LanDrop-Windows.zip -Force
+      - name: Upload macOS app
+        if: matrix.target == 'macos'
+        uses: actions/upload-artifact@v4
+        with:
+          name: LanDrop-macOS
+          path: flutter_app/build/LanDrop-macOS.zip
+          if-no-files-found: error
+      - name: Upload Windows app
+        if: matrix.target == 'windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: LanDrop-Windows
+          path: flutter_app/build/LanDrop-Windows.zip
+          if-no-files-found: error
