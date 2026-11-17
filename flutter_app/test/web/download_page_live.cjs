@@ -23,18 +23,25 @@ class XHR extends Element {
     if (mode==='resume' && this.path.includes('offset=4194304') && !networkFailed) {
       networkFailed=true; await this.emit('error'); return;
     }
-    let path=this.path;
-    if (mode==='resume' && !injected409) { injected409=true; path=path.replace('offset=0','offset=1'); }
-    const req=this.req=http.request(new URL(path,base),{method:this.method,headers:{...this.headers,'Content-Length':bytes.length}},res=>{
+    let path=this.path, wireBytes=bytes;
+    if (mode==='resume' && !injected409) {
+      injected409=true; path=path.replace('offset=0','offset=1');
+      // Exercise a real 409 deterministically without sending a multi-MiB body
+      // into an intentionally early-rejecting server. Windows may report EPIPE
+      // before reading that rejection if an outstanding large write is reset.
+      // Real network failures are tested separately at the next chunk below.
+      wireBytes=Buffer.alloc(0);
+    }
+    const req=this.req=http.request(new URL(path,base),{method:this.method,headers:{...this.headers,'Content-Length':wireBytes.length}},res=>{
       const chunks=[]; res.on('data',b=>chunks.push(b)); res.on('end',()=>{
         this.status=res.statusCode; this.responseText=Buffer.concat(chunks).toString();
-        wire.push({method:this.method,path,status:this.status,bytes:bytes.length}); this.emit('load');
+        wire.push({method:this.method,path,status:this.status,bytes:wireBytes.length}); this.emit('load');
       });
     });
     req.on('error',()=>{ if (!this.aborted) this.emit('error'); });
     if(mode==='cancel') {
       req.write(bytes.subarray(0,32),()=>{ this.upload.emit('progress',{lengthComputable:true,loaded:32,total:bytes.length}); activePartial=this; });
-    } else req.end(bytes,()=>this.upload.emit('progress',{lengthComputable:true,loaded:bytes.length,total:bytes.length}));
+    } else req.end(wireBytes,()=>this.upload.emit('progress',{lengthComputable:true,loaded:wireBytes.length,total:wireBytes.length}));
   }
   abort() { this.aborted=true; this.req?.destroy(); this.emit('abort'); }
 }
@@ -52,7 +59,7 @@ async function main() {
   const bytes=Buffer.alloc(4194304+37,97);
   const file=new File([bytes],'live 空格&?#%.bin',{lastModified:123});
   const app=createApp(); mode='resume'; await app.choose([file]); await app.button.emit('click');
-  assert.equal(state(app.rows[0]),'paused'); assert.equal(app.rows[0].children[2].value,4194304/bytes.length*100);
+  assert.equal(state(app.rows[0]),'paused'); assert.equal(app.rows[0].children[2].value,4194304/bytes.length*100,JSON.stringify({wire,status:app.rows[0].children[1].textContent}));
   assert.ok(wire.some(r=>r.method==='PATCH'&&r.status===409),'real server 409 exercised');
   const existing=wire.filter(r=>r.method==='POST'&&r.path.startsWith('/uploads?')).at(-1);
   const repeated=await liveFetch(existing.path,{method:'POST'}); assert.equal(repeated.status,201);

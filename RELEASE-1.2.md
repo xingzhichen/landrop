@@ -24,6 +24,7 @@ GATE: OFF (no build active)
 - 桌面实际字体截图测试及新增工作台交互测试通过，覆盖1440/1024/820/680/390；四个导航在1440/390均无 RenderFlex overflow。
 - 真实 Dart HttpServer + Node 执行服务器实际生成 JS 的联调覆盖：4MiB分块、409偏移校准、断网后恢复、重新选择原文件、取消/清理、跨页隔离、来源拒绝、媒体、ZIP、完成回执。
 - 首次 Windows CI 暴露路径断言分隔符及强杀 ZIP isolate 后遗留文件句柄；已改平台路径 API 和协作式取消，在每次读取检查取消，并在 finally 关闭输入/输出，等待 worker 退出后才完成清理。新增独立子进程检查原生文件句柄释放（Mac lsof / Windows FileShare.None），没有跳过 Windows 测试。
+- Windows 二次CI的ZIP资源测试已通过；联调脚本又暴露了故意409探测带大请求体时的 TCP reset/EPIPE 时序差异。409探测改为空body、真实偏移冲突请求，保留独立的大块网络中断/继续测试，不放宽结果断言；本机相关8项联调与脚本测试复验通过。
 - 引擎测试另外覆盖目录链接跳过、ZIP CRC/路径/重名、128MiB真实socket取消、ZIP准备取消、设置/记录恢复、完成响应丢失及重启后确认、receipt TTL/数量边界、If-Range匹配与源文件变更。
 - Mac 原生 Flutter bundle 实际运行：desktop shell initialize、后台模式开关、窗口显示回调、原生 quit 均通过，进程正常退出。
 - Mac AppKit 真实窗口 harness：`performClose` 隐藏而非销毁、恢复窗口通过；harness未读取用户页面。
