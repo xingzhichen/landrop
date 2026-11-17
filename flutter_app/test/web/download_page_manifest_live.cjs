@@ -31,8 +31,8 @@ async function main() {
   await mutate('add'); await app.poll();
   assert.equal(rows().length,1,'empty transfer begins polling before any file exists');
   const first=rows()[0], check=first.querySelector('.file-select');
-  assert.equal(first.querySelector('.file-name').textContent,'photo<&" 空格.png');
-  assert.match(first.querySelector('.file-path').textContent,/目录<&/);
+  assert.equal(first.querySelector('.file-name').textContent,'photo& 空格.png');
+  assert.match(first.querySelector('.file-path').textContent,/目录&特殊字符/);
   assert.equal(check.checked,false,'new files are not selected');
   check.checked=true; await check.emit('change'); check.focus();
   const id=check.value;

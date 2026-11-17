@@ -76,9 +76,9 @@ void main() {
     final controller = LanDropController(receiveDirectory: directory);
     Process? node;
     try {
-      final source = await Directory('${directory.path}/目录<&').create();
-      final image = await File('${source.path}/photo<&" 空格.png')
-          .writeAsBytes([137, 80, 78, 71]);
+      final source = await Directory('${directory.path}/目录&特殊字符').create();
+      const imageName = 'photo& 空格.png';
+      await File('${source.path}/$imageName').writeAsBytes([137, 80, 78, 71]);
       final svg =
           await File('${source.path}/active.svg').writeAsString('<svg/>');
       final html = await File('${source.path}/active.html')
@@ -103,7 +103,7 @@ void main() {
           case 'add':
             await controller.addPaths(page, [source.path]);
             for (final file in page.files.toList()) {
-              if (file.name != image.uri.pathSegments.last) {
+              if (file.name != imageName) {
                 await controller.removeFile(page, file);
               }
             }
