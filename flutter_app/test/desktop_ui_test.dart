@@ -1,5 +1,6 @@
 // ignore_for_file: deprecated_member_use
 import 'dart:io';
+import 'dart:async';
 import 'dart:ui' as ui;
 
 import 'package:flutter/material.dart';
@@ -9,6 +10,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:landrop/landrop_controller.dart';
 import 'package:landrop/main.dart';
 import 'package:landrop/app_theme.dart';
+import 'package:landrop/desktop_file_manager.dart';
 
 class _PreviewController extends LanDropController {
   _PreviewController({this.empty = false});
@@ -56,6 +58,27 @@ class _PreviewController extends LanDropController {
 
   @override
   int? portFor(SharePage page) => page.running ? 47123 : null;
+}
+
+class _TestFileManager extends DesktopFileManager {
+  final opened = <String>[];
+  final revealed = <String>[];
+  bool fail = false;
+  Completer<void>? pending;
+
+  @override
+  Future<void> openDirectory(String path) async {
+    opened.add(path);
+    if (pending != null) await pending!.future;
+    if (fail) throw const FileManagerException('接收文件夹不存在或已被移动。');
+  }
+
+  @override
+  Future<void> revealFile(String path) async {
+    revealed.add(path);
+    if (pending != null) await pending!.future;
+    if (fail) throw const FileManagerException('文件不存在或已被移动，无法在文件夹中显示。');
+  }
 }
 
 const _capture = bool.fromEnvironment('UI_SHOTS');
@@ -175,6 +198,66 @@ void main() {
     expect(find.text('文件路径已复制'), findsOneWidget);
     tester.binding.defaultBinaryMessenger
         .setMockMethodCallHandler(SystemChannels.platform, null);
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+  for (final width in [1440.0, 390.0]) {
+    testWidgets('received folder actions route actual paths at width $width',
+        (tester) async {
+      tester.view.physicalSize = Size(width, 1200);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+      final controller = _PreviewController();
+      final manager = _TestFileManager();
+      addTearDown(controller.dispose);
+      await tester.pumpWidget(MaterialApp(
+          theme: AppTheme.light,
+          home: HomeScreen(controller: controller, fileManager: manager)));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('接收记录').first);
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('打开接收文件夹'));
+      await tester.pumpAndSettle();
+      expect(manager.opened, [controller.receiveDirectory]);
+      final reveal = find.text('在文件夹中显示');
+      await tester.ensureVisible(reveal);
+      await tester.tap(reveal);
+      await tester.pumpAndSettle();
+      expect(manager.revealed, [controller.receivedFiles.single.path]);
+      expect(tester.takeException(), isNull);
+      manager.fail = true;
+      await tester.tap(reveal);
+      await tester.pumpAndSettle();
+      expect(find.textContaining('文件不存在或已被移动'), findsOneWidget);
+      expect(tester.takeException(), isNull);
+      await tester.pumpWidget(const SizedBox.shrink());
+    });
+  }
+
+  testWidgets('folder actions block duplicate requests while opening',
+      (tester) async {
+    tester.view.physicalSize = const Size(1200, 1100);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    final controller = _PreviewController();
+    final manager = _TestFileManager()..pending = Completer<void>();
+    addTearDown(controller.dispose);
+    await tester.pumpWidget(MaterialApp(
+        theme: AppTheme.light,
+        home: HomeScreen(controller: controller, fileManager: manager)));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('接收记录').first);
+    await tester.pumpAndSettle();
+    final folder = find.byKey(const ValueKey('open-receive-directory'));
+    await tester.tap(folder);
+    await tester.pump();
+    expect(tester.widget<OutlinedButton>(folder).onPressed, isNull);
+    expect(manager.opened, hasLength(1));
+    manager.pending!.complete();
+    await tester.pumpAndSettle();
+    expect(tester.widget<OutlinedButton>(folder).onPressed, isNotNull);
     expect(tester.takeException(), isNull);
     await tester.pumpWidget(const SizedBox.shrink());
   });

@@ -11,6 +11,7 @@ import 'package:qr_flutter/qr_flutter.dart';
 import 'landrop_controller.dart';
 import 'create_page_dialog.dart';
 import 'app_theme.dart';
+import 'desktop_file_manager.dart';
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
@@ -32,12 +33,14 @@ class LanDropApp extends StatelessWidget {
 }
 
 class HomeScreen extends StatefulWidget {
-  const HomeScreen({super.key, this.controller, this.pickFiles});
+  const HomeScreen(
+      {super.key, this.controller, this.pickFiles, this.fileManager});
 
   /// Optional state/picker injection for native widget previews and tests.
   /// An injected controller remains owned by its caller and is not disposed here.
   final LanDropController? controller;
   final PickShareFiles? pickFiles;
+  final DesktopFileManager? fileManager;
 
   @override
   State<HomeScreen> createState() => _HomeScreenState();
@@ -47,6 +50,8 @@ class _HomeScreenState extends State<HomeScreen> {
   late final LanDropController _controller =
       widget.controller ?? LanDropController();
   PickShareFiles get _pickFiles => widget.pickFiles ?? FilePicker.pickFiles;
+  DesktopFileManager get _fileManager =>
+      widget.fileManager ?? const DesktopFileManager();
   int _destination = 0;
   bool _loading = true;
   bool _working = false;
@@ -534,6 +539,18 @@ class _HomeScreenState extends State<HomeScreen> {
                           _copy(_controller.receiveDirectory!, '接收目录已复制')),
                 ]),
               ),
+              const SizedBox(height: 12),
+              Wrap(children: [
+                OutlinedButton.icon(
+                  key: const ValueKey('open-receive-directory'),
+                  onPressed: _working
+                      ? null
+                      : () => _perform(() => _fileManager
+                          .openDirectory(_controller.receiveDirectory!)),
+                  icon: const Icon(Icons.folder_open_outlined, size: 18),
+                  label: const Text('打开接收文件夹'),
+                ),
+              ]),
             ],
             const SizedBox(height: 20),
             const Divider(),
@@ -581,11 +598,33 @@ class _HomeScreenState extends State<HomeScreen> {
                                     fontFamily: 'monospace',
                                     color: AppTheme.muted,
                                     height: 1.6)),
+                            const SizedBox(height: 12),
+                            Wrap(
+                                spacing: 8,
+                                runSpacing: 8,
+                                crossAxisAlignment: WrapCrossAlignment.center,
+                                children: [
+                                  OutlinedButton.icon(
+                                    key: ValueKey(
+                                        'reveal-received-${file.path}'),
+                                    onPressed: _working
+                                        ? null
+                                        : () => _perform(() =>
+                                            _fileManager.revealFile(file.path)),
+                                    icon: const Icon(
+                                        Icons.drive_file_move_outlined,
+                                        size: 18),
+                                    label: const Text('在文件夹中显示'),
+                                  ),
+                                  IconButton(
+                                    tooltip: '复制保存路径',
+                                    icon: const Icon(Icons.copy_outlined,
+                                        size: 18),
+                                    onPressed: () =>
+                                        _copy(file.path, '文件路径已复制'),
+                                  ),
+                                ]),
                           ])),
-                      IconButton(
-                          tooltip: '复制保存路径',
-                          icon: const Icon(Icons.copy_outlined, size: 18),
-                          onPressed: () => _copy(file.path, '文件路径已复制')),
                     ]),
               ),
               const Divider(),
