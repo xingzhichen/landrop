@@ -114,9 +114,47 @@ class SharePage {
   }
 }
 
+class ReceivedFile {
+  const ReceivedFile({
+    required this.name,
+    required this.path,
+    required this.size,
+    required this.pageTitle,
+    required this.receivedAt,
+  });
+
+  final String name;
+  final String path;
+  final int size;
+  final String pageTitle;
+  final DateTime receivedAt;
+}
+
+class _Upload {
+  final cancelled = Completer<void>();
+  final done = Completer<void>();
+
+  void cancel() {
+    if (!cancelled.isCompleted) cancelled.complete();
+  }
+}
+
+class _UploadCancelled implements Exception {}
+
+class _UploadTooLarge implements Exception {}
+
 /// Owns each page's independent listener, persisted state, and mobile file copies.
 class LanDropController extends ChangeNotifier {
+  /// Tests can supply a base directory without invoking path_provider.
+  LanDropController({Directory? receiveDirectory})
+      : _receiveBaseDirectory = receiveDirectory;
+
   static const _storageKey = 'landrop.pages.v1';
+  static const _maxUploadBytes = 1024 * 1024 * 1024;
+  final Directory? _receiveBaseDirectory;
+  final List<ReceivedFile> receivedFiles = [];
+  String? receiveDirectory;
+  final Map<String, Set<_Upload>> _uploads = {};
   final List<SharePage> pages = [];
   final Map<String, HttpServer> _servers = {};
   final Map<String, String> pageErrors = {};
@@ -129,13 +167,7 @@ class LanDropController extends ChangeNotifier {
 
   Future<void> initialize() async {
     _preferences = await SharedPreferences.getInstance();
-    if (isMobile) {
-      final support = await getApplicationSupportDirectory();
-      _fileDirectory = Directory(
-        '${support.path}${Platform.pathSeparator}landrop_shared_files',
-      );
-      await _fileDirectory!.create(recursive: true);
-    }
+    if (isMobile) await _ensureFileDirectory();
     final saved = _preferences!.getString(_storageKey);
     if (saved != null) {
       try {
@@ -206,33 +238,52 @@ class LanDropController extends ChangeNotifier {
     return page;
   }
 
+  Future<Directory> _ensureFileDirectory() async {
+    if (_fileDirectory != null) return _fileDirectory!;
+    final support = await getApplicationSupportDirectory();
+    _fileDirectory = Directory(
+      '${support.path}${Platform.pathSeparator}landrop_shared_files',
+    );
+    await _fileDirectory!.create(recursive: true);
+    return _fileDirectory!;
+  }
+
   Future<void> addFiles(SharePage page, List<PlatformFile> selections) async {
     for (final selection in selections) {
       final path = selection.path;
-      if (path == null) throw const FileSystemException('所选文件没有可读取的路径');
-      final original = File(path);
-      final size = await original.length();
+      final managed = isMobile || path == null;
       final id = newId();
-      String storedPath = path;
-      if (isMobile) {
-        final destination = File(
-          '${_fileDirectory!.path}${Platform.pathSeparator}$id',
-        );
+      var storedPath = path;
+      int size;
+      if (managed) {
+        final directory = await _ensureFileDirectory();
+        final destination =
+            File('${directory.path}${Platform.pathSeparator}$id');
+        final sink = destination.openWrite();
         try {
-          await original.copy(destination.path);
+          await sink.addStream(selection.readAsByteStream());
+          await sink.close();
+          size = await destination.length();
         } catch (_) {
+          try {
+            await sink.close();
+          } catch (_) {
+            // Preserve the original copy error; remove any partial output.
+          }
           if (await destination.exists()) await destination.delete();
           rethrow;
         }
         storedPath = destination.path;
+      } else {
+        size = await File(path).length();
       }
       page.files.add(
         SharedFile(
           id: id,
           name: selection.name,
-          path: storedPath,
+          path: storedPath!,
           size: size,
-          managed: isMobile,
+          managed: managed,
         ),
       );
       await _persist();
@@ -259,13 +310,9 @@ class LanDropController extends ChangeNotifier {
   }
 
   Future<void> _deleteManagedFile(SharedFile file) async {
-    if (!file.managed ||
-        _fileDirectory == null ||
-        !_uuidPattern.hasMatch(file.id)) {
-      return;
-    }
-    final expected =
-        '${_fileDirectory!.path}${Platform.pathSeparator}${file.id}';
+    if (!file.managed || !_uuidPattern.hasMatch(file.id)) return;
+    final directory = await _ensureFileDirectory();
+    final expected = '${directory.path}${Platform.pathSeparator}${file.id}';
     if (file.path != expected) return;
     final stored = File(expected);
     if (await stored.exists()) await stored.delete();
@@ -311,7 +358,266 @@ class LanDropController extends ChangeNotifier {
 
   Future<void> _unbind(SharePage page) async {
     final server = _servers.remove(page.id);
+    final pending = _uploads[page.id]?.toList() ?? <_Upload>[];
+    for (final upload in pending) {
+      upload.cancel();
+    }
     if (server != null) await server.close(force: true);
+    await Future.wait(pending.map((upload) => upload.done.future));
+  }
+
+  Future<Directory> _receiveRoot() async {
+    Directory? base = _receiveBaseDirectory;
+    if (base == null) {
+      try {
+        base = await getDownloadsDirectory();
+      } catch (_) {
+        // Downloads is unavailable on some platforms.
+      }
+      base ??= await getApplicationDocumentsDirectory();
+    }
+    final root = Directory('${base.path}${Platform.pathSeparator}LanDrop');
+    await root.create(recursive: true);
+    receiveDirectory = root.path;
+    return root;
+  }
+
+  String _receivedName(String input) {
+    // Treat both Windows and Unix separators as paths, on every platform.
+    var name = input
+        .split(RegExp(r'[/\\]'))
+        .last
+        .replaceAll(RegExp(r'[\x00-\x1f\x7f-\x9f<>:"|?*]'), '_')
+        .trim()
+        .replaceAll(RegExp(r'[. ]+$'), '');
+    if (RegExp(r'^(con|prn|aux|nul|com[1-9¹²³]|lpt[1-9¹²³])$',
+            caseSensitive: false)
+        .hasMatch(name.split('.').first.trim())) {
+      name = '_$name';
+    }
+    final shortened = StringBuffer();
+    var bytes = 0;
+    for (final rune in name.runes) {
+      final character = String.fromCharCode(rune);
+      bytes += utf8.encode(character).length;
+      if (bytes > 180) break;
+      shortened.write(character);
+    }
+    name = shortened.toString().replaceAll(RegExp(r'[. ]+$'), '');
+    return name.isEmpty || name == '.' || name == '..' ? 'upload' : name;
+  }
+
+  bool _uploadAllowed(HttpRequest request) {
+    final hostHeaders = request.headers[HttpHeaders.hostHeader];
+    if (hostHeaders == null || hostHeaders.length != 1) return false;
+    final authority = Uri.tryParse('http://${hostHeaders.single}');
+    if (authority == null ||
+        authority.userInfo.isNotEmpty ||
+        authority.path.isNotEmpty ||
+        authority.hasQuery ||
+        authority.hasFragment ||
+        authority.port != request.connectionInfo?.localPort) {
+      return false;
+    }
+    // Only numeric local interface addresses (and localhost) are advertised.
+    // Reject attacker-controlled DNS names even when Origin matches Host.
+    final host = authority.host.toLowerCase();
+    if (host != 'localhost' &&
+        host != '127.0.0.1' &&
+        host != '::1' &&
+        !addresses.contains(host)) {
+      return false;
+    }
+    final sites = request.headers['sec-fetch-site'];
+    if (sites != null &&
+        (sites.length != 1 ||
+            !const ['same-origin', 'none'].contains(sites.single))) {
+      return false;
+    }
+    final origins = request.headers['origin'];
+    if (origins == null) return true;
+    if (origins.length != 1) return false;
+    final origin = Uri.tryParse(origins.single);
+    return origin != null &&
+        origin.scheme == 'http' &&
+        origin.userInfo.isEmpty &&
+        origin.path.isEmpty &&
+        !origin.hasQuery &&
+        !origin.hasFragment &&
+        origin.host.toLowerCase() == host &&
+        origin.port == authority.port;
+  }
+
+  Future<void> _uploadJson(
+      HttpResponse response, int status, Object body) async {
+    final data = utf8.encode(jsonEncode(body));
+    response.statusCode = status;
+    response.headers.contentType = ContentType.json;
+    response.contentLength = data.length;
+    response.add(data);
+    await response.close();
+  }
+
+  Future<void> _rejectUpload(
+      HttpRequest request, int status, String error) async {
+    // dart:io otherwise drains an unlistened body before sending its response.
+    // Never wait for a rejected (possibly infinite) body to finish uploading.
+    final input = request.listen(null, onError: (Object _) {})..pause();
+    request.response.persistentConnection = false;
+    try {
+      await _uploadJson(request.response, status, {'error': error});
+    } finally {
+      await input.cancel();
+    }
+  }
+
+  Future<void> _receive(SharePage page, HttpRequest request) async {
+    final response = request.response;
+    if (!_uploadAllowed(request)) {
+      await _rejectUpload(request, HttpStatus.forbidden, 'Forbidden');
+      return;
+    }
+    final names = request.uri.queryParametersAll['name'];
+    if (names == null || names.length != 1 || names.single.isEmpty) {
+      await _rejectUpload(request, HttpStatus.badRequest, 'Missing name');
+      return;
+    }
+    if (request.contentLength > _maxUploadBytes) {
+      await _rejectUpload(
+          request, HttpStatus.requestEntityTooLarge, 'File exceeds 1 GiB');
+      return;
+    }
+    final server = _servers[page.id];
+    if (server == null) return;
+    final upload = _Upload();
+    (_uploads[page.id] ??= {}).add(upload);
+    final input = StreamIterator<List<int>>(request);
+    // A single cancellation listener avoids retaining a Future per body chunk.
+    unawaited(upload.cancelled.future.then((_) async {
+      try {
+        await input.cancel();
+      } catch (_) {
+        // The request may already have failed or disconnected.
+      }
+    }));
+    RandomAccessFile? output;
+    File? temporary;
+    File? destination;
+    var committed = false;
+    var bodyStarted = false;
+    void checkActive() {
+      if (upload.cancelled.isCompleted || _servers[page.id] != server) {
+        throw _UploadCancelled();
+      }
+    }
+
+    try {
+      final root = await _receiveRoot();
+      checkActive();
+      // Page IDs originate here or pass strict UUID validation on restore.
+      if (!_uuidPattern.hasMatch(page.id)) {
+        throw const FormatException('Page ID');
+      }
+      final directory =
+          Directory('${root.path}${Platform.pathSeparator}${page.id}');
+      await directory.create(recursive: true);
+      checkActive();
+      temporary =
+          File('${directory.path}${Platform.pathSeparator}.${newId()}.part');
+      await temporary.create(exclusive: true);
+      output = await temporary.open(mode: FileMode.write);
+      var size = 0;
+      while (true) {
+        bodyStarted = true;
+        final available = await input.moveNext();
+        checkActive();
+        if (!available) break;
+        size += input.current.length;
+        if (size > _maxUploadBytes) throw _UploadTooLarge();
+        await output.writeFrom(input.current);
+      }
+      await output.close();
+      output = null;
+      checkActive();
+      final name = _receivedName(names.single);
+      var savedName = name;
+      final dot = name.lastIndexOf('.');
+      final stem = dot > 0 ? name.substring(0, dot) : name;
+      final extension = dot > 0 ? name.substring(dot) : '';
+      for (var index = 0;; index++) {
+        checkActive();
+        savedName = index == 0 ? name : '$stem ($index)$extension';
+        final candidate =
+            File('${directory.path}${Platform.pathSeparator}$savedName');
+        try {
+          // Reserve exclusively: simultaneous uploads cannot replace each other.
+          await candidate.create(exclusive: true);
+          destination = candidate;
+          break;
+        } on FileSystemException {
+          if (!await FileSystemEntity.isFile(candidate.path) &&
+              !await FileSystemEntity.isDirectory(candidate.path) &&
+              !await FileSystemEntity.isLink(candidate.path)) {
+            rethrow;
+          }
+        }
+      }
+      checkActive();
+      await temporary.rename(destination.path);
+      checkActive();
+      receivedFiles.insert(
+          0,
+          ReceivedFile(
+            name: savedName,
+            path: destination.path,
+            size: size,
+            pageTitle: page.title,
+            receivedAt: DateTime.now(),
+          ));
+      committed = true;
+      notifyListeners();
+      await _uploadJson(
+          response, HttpStatus.created, {'name': savedName, 'size': size});
+    } on _UploadCancelled {
+      await _closeAfterError(response, HttpStatus.badRequest);
+    } on _UploadTooLarge {
+      await _uploadJson(response, HttpStatus.requestEntityTooLarge,
+          {'error': 'File exceeds 1 GiB'});
+    } on HttpException {
+      await _closeAfterError(response, HttpStatus.badRequest);
+    } on SocketException {
+      // Disconnected request: finally removes partial files.
+    } catch (_) {
+      if (!bodyStarted) {
+        await _rejectUpload(
+            request, HttpStatus.internalServerError, 'Cannot save file');
+      } else {
+        await _closeAfterError(response, HttpStatus.internalServerError);
+      }
+    } finally {
+      try {
+        await input.cancel();
+      } catch (_) {
+        // A disconnected client may fail cancellation too.
+      }
+      try {
+        await output?.close();
+      } finally {
+        try {
+          if (temporary != null && await temporary.exists()) {
+            await temporary.delete();
+          }
+          if (!committed && destination != null && await destination.exists()) {
+            await destination.delete();
+          }
+        } finally {
+          final pending = _uploads[page.id];
+          pending?.remove(upload);
+          if (pending != null && pending.isEmpty) _uploads.remove(page.id);
+          upload.done.complete();
+        }
+      }
+    }
   }
 
   Future<void> _serve(SharePage page, HttpRequest request) async {
@@ -319,6 +625,15 @@ class LanDropController extends ChangeNotifier {
     response.headers.set('X-Content-Type-Options', 'nosniff');
     response.headers.set('Cache-Control', 'no-store');
     try {
+      if (request.uri.path == '/upload') {
+        if (request.method == 'POST') {
+          await _receive(page, request);
+        } else {
+          response.headers.set('Allow', 'POST');
+          await _closeAfterError(response, HttpStatus.methodNotAllowed);
+        }
+        return;
+      }
       if (request.method != 'GET' && request.method != 'HEAD') {
         response.statusCode = HttpStatus.methodNotAllowed;
         response.headers.set('Allow', 'GET, HEAD');

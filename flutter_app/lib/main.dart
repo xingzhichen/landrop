@@ -115,12 +115,9 @@ class _HomeScreenState extends State<HomeScreen> {
                   const SizedBox(height: 12),
                   OutlinedButton.icon(
                     onPressed: () async {
-                      final result = await FilePicker.platform.pickFiles(
-                        allowMultiple: true,
-                        withData: false,
-                      );
-                      if (result != null && dialogContext.mounted) {
-                        setDialogState(() => selections = result.files);
+                      final result = await FilePicker.pickFiles();
+                      if (dialogContext.mounted && result.isNotEmpty) {
+                        setDialogState(() => selections = result);
                       }
                     },
                     icon: const Icon(Icons.folder_open_outlined),
@@ -178,12 +175,9 @@ class _HomeScreenState extends State<HomeScreen> {
 
   Future<void> _addFiles(SharePage page) async {
     await _perform(() async {
-      final result = await FilePicker.platform.pickFiles(
-        allowMultiple: true,
-        withData: false,
-      );
-      if (result == null || result.files.isEmpty) return;
-      await _controller.addFiles(page, result.files);
+      final result = await FilePicker.pickFiles();
+      if (result.isEmpty) return;
+      await _controller.addFiles(page, result);
     });
   }
 
@@ -273,6 +267,8 @@ class _HomeScreenState extends State<HomeScreen> {
                               crossAxisAlignment: CrossAxisAlignment.stretch,
                               children: [
                                 _networkCard(available, address),
+                                const SizedBox(height: 16),
+                                _receivedCard(),
                                 const SizedBox(height: 22),
                                 Row(
                                   children: [
@@ -310,6 +306,55 @@ class _HomeScreenState extends State<HomeScreen> {
       },
     );
   }
+
+  Widget _receivedCard() => Card(
+        elevation: 0,
+        child: Padding(
+          padding: const EdgeInsets.all(18),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Row(children: [
+                Icon(Icons.move_to_inbox_outlined),
+                SizedBox(width: 10),
+                Text('来自手机的文件',
+                    style:
+                        TextStyle(fontSize: 17, fontWeight: FontWeight.w700)),
+              ]),
+              const SizedBox(height: 8),
+              const Text('手机在分享网页中上传后，文件将自动保存到此设备，无需再次下载。'),
+              if (_controller.receiveDirectory != null) ...[
+                const SizedBox(height: 8),
+                SelectableText('接收目录：${_controller.receiveDirectory}',
+                    style: Theme.of(context).textTheme.bodySmall),
+              ],
+              if (_controller.receivedFiles.isEmpty)
+                const Padding(
+                  padding: EdgeInsets.only(top: 12),
+                  child: Text('本次运行尚未接收文件。请保持对应传输页面运行。'),
+                ),
+              for (final file in _controller.receivedFiles.take(20))
+                ListTile(
+                  contentPadding: EdgeInsets.zero,
+                  leading: const Icon(Icons.download_done_rounded,
+                      color: Colors.green),
+                  title: Text(file.name,
+                      maxLines: 1, overflow: TextOverflow.ellipsis),
+                  subtitle: SelectableText(
+                      '${_sizeLabel(file.size)} · ${file.pageTitle}\n${file.path}'),
+                  trailing: IconButton(
+                    tooltip: '复制保存路径',
+                    icon: const Icon(Icons.copy_outlined),
+                    onPressed: () async {
+                      await Clipboard.setData(ClipboardData(text: file.path));
+                      if (mounted) _notice('文件路径已复制');
+                    },
+                  ),
+                ),
+            ],
+          ),
+        ),
+      );
 
   Widget _networkCard(List<String> available, String? address) {
     return Card(
