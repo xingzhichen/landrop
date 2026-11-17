@@ -17,7 +17,8 @@
 - 引擎/控制器：24 项串行测试通过；覆盖传输归属隔离、manifest 缓存/扫描合并与变更失效、外部文件删除及 symlink 安全。
 - 工作台/创建对话框/桌面截图：38 项通过，覆盖双导航、名称-only 创建、同名传输接收隔离、亮度实时变化与五种窗口宽度。
 - macOS Release：已成功构建并用 `tool/package_macos.sh` 打包；`codesign --verify --deep --strict` 通过，签名保留文件选择只读权限；ZIP 169 个成员 CRC 校验通过，App 版本 `1.3.0 (6)`。
-- Windows Release CI：提交后待 GitHub Actions 验证；这不是 Windows 图形界面实机验收。
+- macOS Release CI：GitHub Actions 运行 #10（提交 `31a34d6`）的分析、105 项测试、Release 构建、签名与 `LanDrop-macOS` 打包均通过。随后 `05a1a03` 只修正 Windows 不支持字符的测试夹具；该最终提交本机全量测试与分析也通过。
+- Windows Release CI：GitHub Actions 运行 #11（提交 `05a1a03`）的分析、105 项测试、Windows Release 构建及 `LanDrop-Windows` 打包均通过；这不等同 Windows 图形界面实机验收。
 
 ## 交付边界
 
