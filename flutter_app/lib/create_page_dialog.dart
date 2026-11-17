@@ -4,6 +4,8 @@ import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
+import 'app_theme.dart';
+
 typedef PickShareFiles = Future<List<PlatformFile>> Function();
 
 /// Collects a page title and files without starting the transfer itself.
@@ -81,6 +83,10 @@ class _CreatePageDialogState extends State<CreatePageDialog> {
   @override
   Widget build(BuildContext context) {
     return AlertDialog(
+      insetPadding: const EdgeInsets.symmetric(horizontal: 20, vertical: 24),
+      titlePadding: const EdgeInsets.fromLTRB(24, 26, 24, 12),
+      contentPadding: const EdgeInsets.fromLTRB(24, 0, 24, 12),
+      actionsPadding: const EdgeInsets.fromLTRB(24, 8, 24, 22),
       title: const Text('新建传输页面'),
       content: SizedBox(
         width: 430,
@@ -89,6 +95,12 @@ class _CreatePageDialogState extends State<CreatePageDialog> {
             mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
+              const Text(
+                '为这组文件命名，创建后即可通过链接或二维码传输。',
+                style:
+                    TextStyle(color: AppTheme.muted, fontSize: 13, height: 1.7),
+              ),
+              const SizedBox(height: 22),
               TextField(
                 key: CreatePageDialog.titleFieldKey,
                 controller: _input,
@@ -102,11 +114,29 @@ class _CreatePageDialogState extends State<CreatePageDialog> {
                 ),
               ),
               const SizedBox(height: 12),
-              OutlinedButton.icon(
-                key: CreatePageDialog.pickFilesKey,
-                onPressed: _picking ? null : _pickFiles,
-                icon: const Icon(Icons.folder_open_outlined),
-                label: const Text('选择文件（可多选）'),
+              Container(
+                width: double.infinity,
+                padding: const EdgeInsets.all(16),
+                decoration: BoxDecoration(
+                  color: AppTheme.background,
+                  border: Border.all(color: AppTheme.border),
+                  borderRadius: BorderRadius.circular(12),
+                ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    OutlinedButton.icon(
+                      key: CreatePageDialog.pickFilesKey,
+                      onPressed: _picking ? null : _pickFiles,
+                      icon: const Icon(Icons.folder_open_outlined, size: 19),
+                      label: const Text('选择文件（可多选）'),
+                    ),
+                    const SizedBox(height: 8),
+                    const Text('可一次选择多个文件，原文件保留在本机。',
+                        style: TextStyle(
+                            fontSize: 12, color: AppTheme.muted, height: 1.6)),
+                  ],
+                ),
               ),
               if (_picking) ...[
                 const SizedBox(height: 10),

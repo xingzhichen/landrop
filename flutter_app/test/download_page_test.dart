@@ -17,7 +17,15 @@ void main() {
     expect(html, contains('href="/file/15bd1547-cae0-4b5e-9662-2f24b2ef6e89"'));
     expect(html, contains('2 KB'));
     expect(html, contains('prefers-reduced-motion'));
-    expect(html, contains('prefers-color-scheme:dark'));
+    expect(html, contains(':root.theme-dark'));
+    expect(html, contains('LanDrop'));
+    expect(html, isNot(contains('SHARE SPACE')));
+    expect(html, contains('grid-template-columns:minmax(0,1fr) 340px'));
+    expect(html, contains('@media(max-width:760px)'));
+    expect(html, contains('--primary:#1F2DE6'));
+    expect(html, contains('请连接同一 Wi-Fi'));
+    expect(html, contains('data-enter'));
+    expect(html, contains('href="#top"'));
     expect(html, contains('file-card'));
     expect(html, contains('@keyframes rise'));
     expect(html, contains('id="theme-toggle"'));
