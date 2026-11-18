@@ -653,43 +653,60 @@ class _HomeScreenState extends State<HomeScreen> {
 
   Widget _transferSummary(SharePage page) => ActionMotion(
           child: Card(
-        child: InkWell(
-          key: ValueKey('open-transfer-${page.id}'),
-          borderRadius: BorderRadius.circular(16),
-          onTap: () => setState(() => _selectedTransferId = page.id),
-          child: Padding(
-              padding: const EdgeInsets.all(22),
-              child: Row(children: [
-                Container(
-                    padding: const EdgeInsets.all(12),
-                    decoration: BoxDecoration(
-                        color: _colors.primaryTint,
-                        borderRadius: BorderRadius.circular(12)),
-                    child: Icon(Icons.swap_horiz_rounded,
-                        color: _colors.primary, size: 26)),
-                const SizedBox(width: 16),
-                Expanded(
-                    child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                      Text(page.title,
-                          maxLines: 2,
-                          overflow: TextOverflow.ellipsis,
-                          style: const TextStyle(
-                              fontSize: 18, fontWeight: FontWeight.w700)),
-                      const SizedBox(height: 8),
-                      Wrap(spacing: 12, runSpacing: 8, children: [
-                        _status(
-                            _controller.portFor(page) == null ? '已停止' : '运行中',
-                            active: _controller.portFor(page) != null),
-                        Text(
-                            '分享 ${page.files.length} 个 · 收到 ${_controller.receivedFilesFor(page).length} 个',
-                            style: TextStyle(color: _colors.muted, height: 2)),
-                      ]),
-                    ])),
-                const SizedBox(width: 8),
-                Icon(Icons.chevron_right, color: _colors.muted),
-              ])),
+        child: Padding(
+          padding: const EdgeInsets.all(22),
+          child: Row(children: [
+            Expanded(
+                child: InkWell(
+              key: ValueKey('open-transfer-${page.id}'),
+              borderRadius: BorderRadius.circular(16),
+              onTap: () => setState(() => _selectedTransferId = page.id),
+              child: Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 8),
+                  child: Row(children: [
+                    Container(
+                        padding: const EdgeInsets.all(12),
+                        decoration: BoxDecoration(
+                            color: _colors.primaryTint,
+                            borderRadius: BorderRadius.circular(12)),
+                        child: Icon(Icons.swap_horiz_rounded,
+                            color: _colors.primary, size: 26)),
+                    const SizedBox(width: 16),
+                    Expanded(
+                        child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                          Text(page.title,
+                              maxLines: 2,
+                              overflow: TextOverflow.ellipsis,
+                              style: const TextStyle(
+                                  fontSize: 18, fontWeight: FontWeight.w700)),
+                          const SizedBox(height: 8),
+                          Wrap(spacing: 12, runSpacing: 8, children: [
+                            _status(
+                                _controller.portFor(page) == null
+                                    ? '已停止'
+                                    : '运行中',
+                                active: _controller.portFor(page) != null),
+                            Text(
+                                '分享 ${page.files.length} 个 · 收到 ${_controller.receivedFilesFor(page).length} 个',
+                                style:
+                                    TextStyle(color: _colors.muted, height: 2)),
+                          ]),
+                        ])),
+                    const SizedBox(width: 8),
+                    Icon(Icons.chevron_right, color: _colors.muted),
+                  ])),
+            )),
+            const SizedBox(width: 4),
+            ActionMotion(
+                child: IconButton(
+              key: ValueKey('delete-transfer-${page.id}'),
+              tooltip: '删除传输',
+              onPressed: _working ? null : () => _deletePage(page),
+              icon: const Icon(Icons.delete_outline),
+            )),
+          ]),
         ),
       ));
 

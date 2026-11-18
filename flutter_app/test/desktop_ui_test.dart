@@ -76,6 +76,16 @@ class _PreviewController extends LanDropController {
 
   @override
   int? portFor(SharePage page) => page.running ? 47123 : null;
+
+  final deletedPageIds = <String>[];
+
+  @override
+  Future<void> removePage(SharePage page) async {
+    deletedPageIds.add(page.id);
+    pages.removeWhere((candidate) => candidate.id == page.id);
+    receivedFiles.removeWhere((file) => file.pageId == page.id);
+    notifyListeners();
+  }
 }
 
 class _TestFileManager extends DesktopFileManager {
@@ -235,6 +245,39 @@ void main() {
     expect(find.text('选择文件（可多选）'), findsNothing);
     expect(tester.takeException(), isNull);
   });
+  testWidgets('transfer summary exposes confirmed delete action',
+      (tester) async {
+    tester.view.physicalSize = const Size(1200, 900);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    final controller = _PreviewController();
+    addTearDown(controller.dispose);
+    await tester.pumpWidget(MaterialApp(
+        theme: AppTheme.light, home: HomeScreen(controller: controller)));
+    await tester.pumpAndSettle();
+
+    const pageId = '00000000-0000-4000-8000-000000000001';
+    final delete = find.byKey(const ValueKey('delete-transfer-$pageId'));
+    expect(delete, findsOneWidget);
+    await tester.tap(delete);
+    await tester.pumpAndSettle();
+    expect(find.text('删除「周末旅行」？'), findsOneWidget);
+    expect(find.textContaining('已接收文件和电脑上的原文件不会删除'), findsOneWidget);
+    await tester.tap(find.text('取消'));
+    await tester.pumpAndSettle();
+    expect(controller.deletedPageIds, isEmpty);
+
+    await tester.tap(delete);
+    await tester.pumpAndSettle();
+    await tester.tap(find.widgetWithText(FilledButton, '删除'));
+    await tester.pumpAndSettle();
+    expect(controller.deletedPageIds, [pageId]);
+    expect(find.text('还没有传输'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
   testWidgets(
       'transfer detail shows shared and received files and copies actual path',
       (tester) async {
