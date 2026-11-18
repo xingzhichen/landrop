@@ -1,0 +1,77 @@
+name: Publish GitHub Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build ${{ matrix.platform }} release
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: macOS
+            runner: macos-latest
+            target: macos
+          - platform: Windows
+            runner: windows-latest
+            target: windows
+    runs-on: ${{ matrix.runner }}
+    defaults:
+      run:
+        working-directory: flutter_app
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+      - name: Install dependencies
+        run: flutter pub get
+      - name: Analyze source
+        run: flutter analyze
+      - name: Run tests
+        run: flutter test
+      - name: Build release
+        run: flutter build ${{ matrix.target }} --release
+      - name: Sign and package macOS application
+        if: matrix.target == 'macos'
+        run: bash tool/package_macos.sh
+      - name: Package Windows application
+        if: matrix.target == 'windows'
+        shell: pwsh
+        run: Compress-Archive -Path build/windows/x64/runner/Release/* -DestinationPath build/LanDrop-Windows.zip -Force
+      - name: Upload release package
+        uses: actions/upload-artifact@v4
+        with:
+          name: LanDrop-${{ matrix.platform }}
+          path: flutter_app/build/LanDrop-${{ matrix.platform }}.zip
+          if-no-files-found: error
+
+  publish:
+    name: Publish release and assets
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: LanDrop-*
+          path: dist
+          merge-multiple: true
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          gh release create "$GITHUB_REF_NAME" dist/*.zip \
+            --verify-tag \
+            --title "LanDrop $version" \
+            --notes-file RELEASE-1.3.md

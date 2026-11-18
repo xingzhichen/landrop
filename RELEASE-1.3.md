@@ -2,7 +2,7 @@
 
 ## 本版范围
 
-- 以命名「传输」作为主工作单元；新建只需填写名称，可先创建空传输，进入详情后再添加文件或文件夹。
+- 以命名「传输」作为主工作单元；新建只需填写名称，可先创建空传输，进入详情后再添加文件或文件夹；列表卡片和详情页均可安全删除传输。
 - 一个传输中的电脑分享清单可供手机下载/预览，手机也可同时上传回电脑，无需电脑端确认；收到文件与历史记录在当前传输详情内，按稳定传输 ID 隔离。
 - 手机网页自动同步电脑端清单新增、删除与重命名内容；保留选择和上传状态，清单请求具备独立超时、可见性恢复、1 秒有界缓存与并发合并。
 - 移除独立「传输动态」导航与界面；传输协议内部仍保留真实任务、取消和续传实现。
@@ -12,13 +12,12 @@
 ## 本地验证
 
 - `flutter analyze --no-pub`：No issues found。
-- `flutter test --no-pub`：105 项测试全部通过。
+- `flutter test --no-pub`：106 项测试全部通过。
 - Web / HttpServer 联调与协议、生成 JS 的浏览器行为测试：28 项通过；覆盖运行中清单实时增删、pending 请求超时/恢复、旧响应隔离、系统主题、媒体和 ZIP。
 - 引擎/控制器：24 项串行测试通过；覆盖传输归属隔离、manifest 缓存/扫描合并与变更失效、外部文件删除及 symlink 安全。
-- 工作台/创建对话框/桌面截图：38 项通过，覆盖双导航、名称-only 创建、同名传输接收隔离、亮度实时变化与五种窗口宽度。
+- 工作台/创建对话框/桌面截图：39 项通过，覆盖双导航、名称-only 创建、列表删除确认、同名传输接收隔离、亮度实时变化与五种窗口宽度。
 - macOS Release：已成功构建并用 `tool/package_macos.sh` 打包；`codesign --verify --deep --strict` 通过，签名保留文件选择只读权限；ZIP 169 个成员 CRC 校验通过，App 版本 `1.3.0 (6)`。
-- macOS Release CI：GitHub Actions 运行 #10（提交 `31a34d6`）的分析、105 项测试、Release 构建、签名与 `LanDrop-macOS` 打包均通过。随后 `05a1a03` 只修正 Windows 不支持字符的测试夹具；该最终提交本机全量测试与分析也通过。
-- Windows Release CI：GitHub Actions 运行 #11（提交 `05a1a03`）的分析、105 项测试、Windows Release 构建及 `LanDrop-Windows` 打包均通过；这不等同 Windows 图形界面实机验收。
+- 最新 GitHub Actions 运行 #13（提交 `8716cd6`）macOS 与 Windows jobs 均通过分析、106 项测试、Release 构建与打包，并上传 `LanDrop-macOS`、`LanDrop-Windows` Artifacts；这不等同 Windows 图形界面实机验收。
 
 ## 交付边界
 

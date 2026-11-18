@@ -2,7 +2,7 @@
 
 **电脑打开，手机扫码，文件在同一局域网内互传。** 支持 macOS、Windows；手机用浏览器即可，**不用安装 App**。
 
-[下载当前桌面版](<https://github.com/xingzhichen/landrop/actions/workflows/build-desktop.yml>) · [反馈问题](<https://github.com/xingzhichen/landrop/issues>)
+[下载当前桌面版（GitHub Release）](<https://github.com/xingzhichen/landrop/releases/latest>) · [反馈问题](<https://github.com/xingzhichen/landrop/issues>)
 
 电脑可以分享多个文件或整个文件夹，手机可下载、预览，也能把照片和文件传回电脑。先下载安装桌面版，再按下方步骤操作。
 
@@ -12,19 +12,17 @@
 
 ## 1. 下载桌面版
 
-**本仓库目前没有 GitHub Release。可下载的桌面版在 GitHub Actions 构建产物中，不需要下载源码或安装开发工具。**
+**正式版本从 [GitHub Releases](<https://github.com/xingzhichen/landrop/releases/latest>) 下载**，选择 `LanDrop-macOS.zip` 或 `LanDrop-Windows.zip`；不需要下载源码或安装开发工具。
 
-1. 登录一个免费的 [GitHub 账号](<https://github.com/login>)，打开 [最新构建列表](<https://github.com/xingzhichen/landrop/actions/workflows/build-desktop.yml>)，选择最新带绿色成功标记的一次构建。
-2. 留在 **Summary（摘要）**，滚动到页面最底部的 **Artifacts（构建产物）**。
-3. Mac 点击 **LanDrop-macOS**，Windows 点击 **LanDrop-Windows**，下载 ZIP。左侧的 macOS / Windows job 是构建日志，**不是下载入口**。
+**备用下载：** 如果 Release 暂不可用，可登录免费的 [GitHub 账号](<https://github.com/login>)，打开 [最新构建列表](<https://github.com/xingzhichen/landrop/actions/workflows/build-desktop.yml>)，选择带绿色成功标记的一次构建；在 **Summary（摘要）** 页面底部的 **Artifacts（构建产物）** 中下载对应平台包。左侧的 macOS / Windows job 是构建日志，**不是下载入口**。
 
-**找不到下载？** Artifacts 会过期，请换较新的成功构建；如果都已过期，请 [提 Issue 请维护者重新构建](<https://github.com/xingzhichen/landrop/issues>)。仓库的 **Code → Download ZIP 只是源码，不能双击安装**。
+**找不到备用包？** Actions Artifacts 会过期，请换较新的成功构建；如果都已过期，请 [提 Issue 请维护者重新构建](<https://github.com/xingzhichen/landrop/issues>)。仓库的 **Code → Download ZIP 只是源码，不能双击安装**。
 
-![GitHub Actions 成功构建列表、Summary 与底部 Artifacts 下载入口](<docs/images/02-github-download.webp>)
+![备用下载方式：GitHub Actions 成功构建列表、Summary 与底部 Artifacts 下载入口](<docs/images/02-github-download.webp>)
 
 ## 2. 解压并打开
 
-**通常需要解压两次：** 浏览器下载的是外层 Artifact ZIP，解压后得到内层 `LanDrop-macOS.zip` 或 `LanDrop-Windows.zip`；再解压内层 ZIP，然后按对应系统操作。如果浏览器已自动解压，看到 `.app` 或 `.exe` 就不必重复解压。
+从 **GitHub Release** 下载的 `LanDrop-macOS.zip` / `LanDrop-Windows.zip` 解压一次即可，再按对应系统操作。若使用上面的 **Actions 备用 Artifacts**，浏览器下载的是外层 ZIP：先解压得到内层 `LanDrop-macOS.zip` 或 `LanDrop-Windows.zip`，再解压内层 ZIP。如果浏览器已自动解压，看到 `.app` 或 `.exe` 就不必重复解压。
 
 | macOS | Windows |
 | --- | --- |
@@ -100,7 +98,8 @@ ZIP **不支持断点续传**，中断后需要重新下载，电脑还需留有
 - [架构与协议](<ARCHITECTURE.md>)
 - [1.3 验证记录与已知边界](<RELEASE-1.3.md>)
 - [1.2 验证记录与已知边界](<RELEASE-1.2.md>)（历史版本）
-- [GitHub Actions 构建配置](<.github/workflows/build-desktop.yml>)：推送 `master` 或手动触发，分析、测试并构建两端，再上传 Artifacts；这些不是已公证的正式安装包。
+- [GitHub Actions 构建配置](<.github/workflows/build-desktop.yml>)：推送 `master` 或手动触发，分析、测试并构建两端，再上传备用 Artifacts。
+- [GitHub Release 发布配置](<.github/workflows/publish-release.yml>)：推送 `v*` 标签后，重新构建并将 macOS / Windows ZIP 发布到正式 Release；macOS 尚未公证，Windows 包未做代码签名。
 
 安装 [Flutter stable](<https://docs.flutter.dev/get-started/install>)，从仓库根目录执行；生产入口为 `lib/main.dart`，两种桌面构建分别在对应系统上运行：
 
