@@ -12,9 +12,17 @@
 
 ## 1. 下载桌面版
 
-**正式版本从 [GitHub Releases](<https://github.com/xingzhichen/landrop/releases/latest>) 下载**，选择 `LanDrop-macOS.zip` 或 `LanDrop-Windows.zip`；不需要下载源码或安装开发工具。
+**正式版本从 [GitHub Releases](<https://github.com/xingzhichen/landrop/releases/latest>) 下载**，选择 `LanDrop-macOS.zip` 或 `LanDrop-Windows.zip`；不需要下载源码或安装开发工具。每个 Release 还附有 `SHA256SUMS`。下载 ZIP 和清单后，在同一目录校验所选包：macOS / Linux 运行 `grep -E '  LanDrop-macOS\.zip$' SHA256SUMS | shasum -a 256 -c -`；Windows PowerShell 运行：
 
-**备用下载：** 如果 Release 暂不可用，可登录免费的 [GitHub 账号](<https://github.com/login>)，打开 [最新构建列表](<https://github.com/xingzhichen/landrop/actions/workflows/build-desktop.yml>)，选择带绿色成功标记的一次构建；在 **Summary（摘要）** 页面底部的 **Artifacts（构建产物）** 中下载对应平台包。左侧的 macOS / Windows job 是构建日志，**不是下载入口**。
+```powershell
+$lines = @(Get-Content .\SHA256SUMS | Where-Object { $_ -match '  LanDrop-Windows\.zip$' })
+if ($lines.Count -ne 1) { throw 'Expected exactly one checksum entry for LanDrop-Windows.zip' }
+$expected = ($lines[0] -split '\s+')[0]
+$actual = (Get-FileHash .\LanDrop-Windows.zip -Algorithm SHA256).Hash
+if ($actual -ne $expected) { throw 'SHA-256 mismatch' } else { 'SHA-256 OK' }
+```
+
+**备用下载：** 如果 Release 暂不可用，可登录免费的 [GitHub 账号](<https://github.com/login>)，打开 [最新构建列表](<https://github.com/xingzhichen/landrop/actions/workflows/build-desktop.yml>)，选择带绿色成功标记的一次构建；在 **Summary（摘要）** 页面底部的 **Artifacts（构建产物）** 中下载对应平台包。成功构建还会提供 `LanDrop-SHA256SUMS` 校验清单 Artifact。左侧的 macOS / Windows job 是构建日志，**不是下载入口**。
 
 **找不到备用包？** Actions Artifacts 会过期，请换较新的成功构建；如果都已过期，请 [提 Issue 请维护者重新构建](<https://github.com/xingzhichen/landrop/issues>)。仓库的 **Code → Download ZIP 只是源码，不能双击安装**。
 
@@ -22,11 +30,11 @@
 
 ## 2. 解压并打开
 
-从 **GitHub Release** 下载的 `LanDrop-macOS.zip` / `LanDrop-Windows.zip` 解压一次即可，再按对应系统操作。若使用上面的 **Actions 备用 Artifacts**，浏览器下载的是外层 ZIP：先解压得到内层 `LanDrop-macOS.zip` 或 `LanDrop-Windows.zip`，再解压内层 ZIP。如果浏览器已自动解压，看到 `.app` 或 `.exe` 就不必重复解压。
+从 **GitHub Release** 下载的 `LanDrop-macOS.zip` / `LanDrop-Windows.zip` 解压一次即可，再按对应系统操作。若使用上面的 **Actions 备用 Artifacts**，浏览器下载的是外层 ZIP：先解压平台 Artifact，得到内层 `LanDrop-macOS.zip` 或 `LanDrop-Windows.zip`，再解压内层 ZIP。如需校验，另解压 `LanDrop-SHA256SUMS` Artifact，并用其中的 `SHA256SUMS` 清单比对内层 ZIP 的摘要。如果浏览器已自动解压，看到 `.app` 或 `.exe` 就不必重复解压。
 
 | macOS | Windows |
 | --- | --- |
-| 将解压得到的 `LanDrop.app` 拖入「应用程序（Applications）」，再打开。 | 将内层 ZIP **完整解压**到一个固定文件夹，再运行其中的 `LanDrop.exe`，没有 MSI / EXE 安装向导。 |
+| 将解压得到的 `LanDrop.app` 拖入「应用程序（Applications）」，再打开。 | 将内层 ZIP **完整解压**到一个固定文件夹，再运行其中的 `landrop.exe`，没有 MSI / EXE 安装向导。 |
 | 当前构建未使用 Developer ID 签名、未公证，首次可能被系统拦截。**只有确认来自本仓库后**，才到「系统设置 → 隐私与安全性」允许打开；不要全局关闭 Gatekeeper。 | **保持 EXE、DLL 和 `data` 文件夹在同一目录**，不要只取出 EXE。首次出现防火墙提示时，仅允许可信的「专用网络」。 |
 
 ![外层 Artifact ZIP 与内层应用 ZIP 的两次解压，以及 Mac 和 Windows 启动流程](<docs/images/03-install.webp>)
@@ -44,17 +52,17 @@
 
 扫描二维码后，手机浏览器打开的就是**这个传输**：
 
-- **电脑 → 手机：** 点单个文件下载，或勾选多项打包为 ZIP；支持的图片、音频、视频可预览。
+- **电脑 → 手机：** 点单个文件下载，或勾选多项打包为 ZIP；整个 App 最多同时进行 16 个单文件下载和 2 个 ZIP 打包任务，可同时进入服务处理的 HTTP 请求最多 64 个，超限时稍后重试；极端过载时会快速关闭连接。支持的图片、音频、视频可预览。
 - **手机 → 电脑：** 在同一网页的「上传到电脑」区域选文件并上传，**无需电脑端确认**。每个文件最大 **1 GiB**；传完后电脑详情里的「来自手机的文件」会显示这次传输收到的文件和位置。
-- **断网后继续上传：** 回到网页点「继续上传」；如果刷新或重开网页，重新选择同一原文件即可恢复。手机系统可能挂起后台网页，因此请保持在前台，不能保证自动后台上传。
+- **断网后继续上传：** 回到网页点「继续上传」；如果刷新或重开网页，重新选择同一原文件即可恢复。连接连续 2 分钟没有新数据时会自动暂停，并保留已确认的分块。整个 App 同时最多处理 8 个上传数据流；最多新建 128 个待续传文件（每个传输最多 16 个），已有会话（包括升级后超限的存量）仍可续传，不会自动删除；完成或取消至低于上限后，才能新建会话。手机系统可能挂起后台网页，因此请保持在前台，不能保证自动后台上传。
 
 ![手机浏览器中从电脑下载或 ZIP，以及无需电脑端确认直接上传回电脑](<docs/images/05-phone.webp>)
 
 ## 5. 查看本传输收到的文件
 
-打开某个传输，在详情下方的「**来自手机的文件**」中查看文件名、保存位置、大小与接收时间。记录持久保存，可复制路径、打开接收文件夹，或在 **Finder / 文件资源管理器**中定位。该列表只属于当前传输，其他传输的接收文件不会混在一起。
+打开某个传输，在详情下方的「**来自手机的文件**」中查看文件名、保存位置、大小与接收时间。记录会持久保存；每个传输最多保留最近 200 条，整个 App 最多保留最近 1000 条。删除传输会移除该传输的记录，但不会删除已保存文件。可复制路径、打开接收文件夹，或在 **Finder / 文件资源管理器**中定位。
 
-默认按传输保存到「下载 / LanDrop / 传输 ID」；下载目录不可用时可能回退到文档目录。每个传输可单独设置接收位置、按日期整理；只影响新收到的文件，不搬动已有文件，同名文件不会覆盖。LanDrop 不会自动打开收到的文件。
+默认按传输保存到「下载 / LanDrop / 传输 ID」；下载目录不可用时可能回退到文档目录。每个传输可单独设置接收位置、按日期整理；只影响新收到的文件，不搬动已有文件，同名文件不会覆盖。Windows 接收位置必须是本地驱动器，不支持 UNC 或网络映射盘。LanDrop 不会自动打开收到的文件。
 
 ![传输详情中该传输自己的接收文件、保存目录与文件定位入口](<docs/images/06-received.webp>)
 
@@ -98,8 +106,8 @@ ZIP **不支持断点续传**，中断后需要重新下载，电脑还需留有
 - [架构与协议](<ARCHITECTURE.md>)
 - [1.3 验证记录与已知边界](<RELEASE-1.3.md>)
 - [1.2 验证记录与已知边界](<RELEASE-1.2.md>)（历史版本）
-- [GitHub Actions 构建配置](<.github/workflows/build-desktop.yml>)：推送 `master` 或手动触发，分析、测试并构建两端，再上传备用 Artifacts。
-- [GitHub Release 发布配置](<.github/workflows/publish-release.yml>)：推送 `v*` 标签后，重新构建并将 macOS / Windows ZIP 发布到正式 Release；macOS 尚未公证，Windows 包未做代码签名。
+- [GitHub Actions 构建配置](<.github/workflows/build-desktop.yml>)：面向 `master` 的 PR、推送 `master` 或手动触发时，分析、测试并构建两端，上传临时 Artifacts 后由独立任务校验 ZIP 完整性和核心运行文件。
+- [GitHub Release 发布配置](<.github/workflows/publish-release.yml>)：推送 `v*` 标签后，先核对标签版本（含预发布后缀）与 `pubspec.yaml`，再构建并将 macOS / Windows ZIP 发布到正式 Release；macOS 尚未公证，Windows 包未做代码签名。
 
 安装 [Flutter stable](<https://docs.flutter.dev/get-started/install>)，从仓库根目录执行；生产入口为 `lib/main.dart`，两种桌面构建分别在对应系统上运行：
 

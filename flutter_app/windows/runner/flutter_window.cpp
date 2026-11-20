@@ -13,6 +13,7 @@
 
 #include "flutter/generated_plugin_registrant.h"
 #include "resource.h"
+#include "secure_fs.h"
 
 namespace {
 
@@ -194,6 +195,16 @@ bool FlutterWindow::OnCreate() {
                  result) {
         HandleFileManagerMethod(GetHandle(), call, std::move(result));
       });
+  secure_fs_channel_ =
+      std::make_unique<flutter::MethodChannel<flutter::EncodableValue>>(
+          flutter_controller_->engine()->messenger(), "landrop/secure_fs",
+          &flutter::StandardMethodCodec::GetInstance());
+  secure_fs_channel_->SetMethodCallHandler(
+      [](const flutter::MethodCall<flutter::EncodableValue>& call,
+         std::unique_ptr<flutter::MethodResult<flutter::EncodableValue>>
+             result) {
+        HandleSecureFileSystemMethod(call, std::move(result));
+      });
   SetChildContent(flutter_controller_->view()->GetNativeWindow());
   shell_window_ = GetHandle();
   shell_channel_ =
@@ -280,6 +291,10 @@ void FlutterWindow::OnDestroy() {
   if (shell_window_ && ::IsWindow(shell_window_)) ::DragAcceptFiles(shell_window_, FALSE);
   shell_window_ = nullptr;
   shell_ready_ = false;
+  if (secure_fs_channel_) {
+    secure_fs_channel_->SetMethodCallHandler(nullptr);
+    secure_fs_channel_.reset();
+  }
   if (shell_channel_) {
     shell_channel_->SetMethodCallHandler(nullptr);
     shell_channel_.reset();

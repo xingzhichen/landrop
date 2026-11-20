@@ -159,6 +159,7 @@ button:disabled{cursor:not-allowed}
 .theme-toggle .sun{display:none}
 .skip-link{position:absolute;left:0;top:8px;z-index:10;padding:12px 16px;background:var(--text);color:var(--surface);border-radius:8px;transform:translateY(-150%)}
 .skip-link:focus{transform:none}
+.sr-only{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}
 
 .page{padding-top:48px;padding-bottom:max(32px,env(safe-area-inset-bottom))}
 .hero{display:flex;align-items:flex-end;justify-content:space-between;gap:32px;margin-bottom:32px}
@@ -208,6 +209,7 @@ button:disabled{cursor:not-allowed}
 .upload-details{border-top:1px solid var(--line);margin-top:24px;padding-top:16px}
 .upload-details summary{font-size:13px;color:var(--muted);cursor:pointer;min-height:44px;display:list-item;align-content:center;list-style-position:inside}
 .upload-help{font-size:13px;color:var(--muted);line-height:1.8;margin-top:8px;overflow-wrap:anywhere}
+.upload-recovery-warning{color:var(--error);font-weight:600}
 .upload-limit{font-size:13px;color:var(--muted);margin-top:8px}
 .upload-list{list-style:none;padding:0;margin:0}
 .upload-item{padding:16px 0;border-bottom:1px solid var(--line);min-width:0}
@@ -229,7 +231,7 @@ button:disabled{cursor:not-allowed}
 .footer{display:flex;justify-content:space-between;gap:16px;flex-wrap:wrap;border-top:1px solid var(--line);margin-top:32px;padding-top:24px;font-size:13px;color:var(--muted)}
 .toast{position:fixed;bottom:max(24px,env(safe-area-inset-bottom));left:50%;width:max-content;max-width:calc(100% - 32px);transform:translate(-50%,12px);opacity:0;pointer-events:none;z-index:5;background:var(--text);color:var(--surface);padding:12px 16px;border-radius:8px;font-size:14px;transition:opacity 150ms var(--ease),transform 150ms var(--ease)}
 .toast.show{opacity:1;transform:translate(-50%,0)}
-[data-enter]{animation:rise 520ms cubic-bezier(.22,1,.36,1) both}
+[data-enter]{animation:rise 260ms cubic-bezier(.22,1,.36,1) both}
 @keyframes rise{from{opacity:.5;transform:translateY(12px)}
 to{opacity:1;transform:translateY(0)}
 }
@@ -240,6 +242,7 @@ to{opacity:1;transform:translateY(0)}
 .upload-button:hover:not(:disabled){background:var(--primary-hover);transform:translateY(-1px)}
 .upload-picker::file-selector-button:hover{background:var(--soft)}
 .upload-details summary:hover{color:var(--primary)}
+.action:hover{color:var(--primary);background:var(--soft)}
 }
 .theme-toggle:active,.upload-button:active:not(:disabled){transform:translateY(1px) scale(.985)}
 .file-card:active{background:var(--soft)}
@@ -248,7 +251,7 @@ to{opacity:1;transform:translateY(0)}
 :root.theme-dark .theme-toggle .moon{display:none}
 :root.theme-dark .theme-toggle .sun{display:block}
 :root.theme-dark .upload-button:not(:disabled){color:#14171F}
-:root.theme-dark .file-card:hover .download-arrow{color:#14171F}
+@media(hover:hover) and (pointer:fine){:root.theme-dark .file-card:hover .download-arrow{color:#14171F}}
 
 @media(max-width:1000px){.workspace{grid-template-columns:minmax(0,1fr) 300px}
 .wrap{width:calc(100% - 48px)}
@@ -296,6 +299,7 @@ to{opacity:1;transform:translateY(0)}
 body,.topbar,.download-panel,.upload-panel{transition:background-color 180ms var(--ease),color 180ms var(--ease),border-color 180ms var(--ease)}
 .selection-bar{display:flex;align-items:center;gap:16px;flex-wrap:wrap;padding:14px 24px;border-bottom:1px solid var(--line);background:var(--bg);transition:background 160ms var(--ease)}
 .selection-bar label{display:flex;align-items:center;gap:8px;font-size:14px;min-height:44px}
+.selection-bar [hidden]{display:none!important}
 .selection-bar.has-selection{background:var(--soft)}
 #selection-count{font-size:13px;color:var(--muted)}
 #zip-download{margin-left:auto}
@@ -304,7 +308,6 @@ input[type=checkbox]::before{content:'';display:block;box-sizing:border-box;widt
 input[type=checkbox]:checked::before{content:'✓';background:var(--primary);border-color:var(--primary)}
 input[type=checkbox]:active{transform:scale(.9)}
 .action{display:inline-flex;align-items:center;justify-content:center;min-height:44px;padding:8px 12px;border:1px solid var(--line);border-radius:8px;background:var(--surface);color:var(--primary);font-size:13px;transition:background 150ms var(--ease),transform 150ms var(--ease)}
-.action:hover{background:var(--soft)}
 .action:active,.download-arrow:active{transform:scale(.97)}
 .file-actions{display:flex;gap:8px;flex:none}
 .file-path{display:block;overflow-wrap:anywhere;color:var(--muted);font-size:12px;margin-top:2px}
@@ -317,6 +320,9 @@ dialog[open].visible{opacity:1;transform:none}
 dialog::backdrop{background:rgba(10,16,30,.65)}
 .preview-header{display:flex;align-items:center;justify-content:space-between;gap:16px;margin-bottom:16px}
 .preview-header h2{font-size:16px;overflow-wrap:anywhere;min-width:0}
+#preview-status{margin:12px 0 0;min-height:1.4em;color:var(--muted);font-size:13px;overflow-wrap:anywhere}
+#preview-status:empty{margin:0;min-height:0}
+#preview-status[data-state="error"]{color:var(--error)}
 #preview-media{display:flex;justify-content:center;min-width:0;overflow:hidden}
 #preview-media img,#preview-media video{display:block;max-width:100%;max-height:65dvh;object-fit:contain;min-width:0}
 #preview-media audio{width:100%;max-width:100%}
@@ -340,13 +346,14 @@ dialog::backdrop{background:rgba(10,16,30,.65)}
 <main class="page wrap" id="top">
 <section class="hero" data-enter aria-labelledby="page-title"><div class="hero-text"><p class="eyebrow">电脑分享的文件</p><h1 id="page-title">$safeTitle</h1><p class="hero-copy">下载到当前设备，也可向此传输上传文件。</p></div><div class="stats" aria-label="分享文件统计"><div class="stat"><strong id="file-count">$count</strong> 个文件</div><div class="stat">总计 <strong id="file-total">${_formatSize(totalBytes)}</strong></div></div></section>
 <div class="workspace">
-<section class="download-panel" aria-labelledby="download-heading"><div class="section-heading"><h2 id="download-heading">下载文件</h2><span>无需安装 App</span></div>
-<div class="selection-bar"><label><input id="select-all" type="checkbox" aria-label="全选文件"> 全选</label><span id="selection-count" role="status" aria-live="polite">已选 0 个</span><a class="action" id="zip-download" href="/download.zip" download>下载全部 ZIP</a></div>
-<div class="file-list" id="file-list" aria-label="可下载文件">
+<section class="download-panel" aria-labelledby="download-heading"><div class="section-heading"><h2 id="download-heading" tabindex="-1">下载文件</h2><span>无需安装 App</span></div>
+<div class="selection-bar"><label><input id="select-all" type="checkbox" aria-label="全选文件"> 全选</label><span id="selection-count" role="status" aria-live="polite">已选 0 个</span><button class="action" id="zip-cancel" type="button" aria-label="取消本页 ZIP 下载任务" title="取消本页发起的 ZIP 下载；已完成或被拒绝的任务会被忽略。" hidden>取消 ZIP 任务</button><a class="action" id="zip-download" href="/download.zip">下载全部 ZIP</a></div>
+<div id="file-list-announcement" class="sr-only" role="status" aria-live="polite" aria-atomic="true"></div>
+<div class="file-list" id="file-list" role="list" aria-label="可下载文件">
 ''');
   if (available.isEmpty) {
     html.write(
-        '''<div class="empty" id="file-empty"><span class="empty-mark" aria-hidden="true">FILE</span><p>暂无可下载的文件</p><p>请在电脑上添加要分享的文件。</p></div>\n''');
+        '''<div class="empty" id="file-empty" role="listitem"><span class="empty-mark" aria-hidden="true">FILE</span><p>暂无可下载的文件</p><p>请在电脑上添加要分享的文件。</p></div>\n''');
   }
   for (var i = 0; i < available.length; i++) {
     final file = available[i];
@@ -371,26 +378,27 @@ dialog::backdrop{background:rgba(10,16,30,.65)}
                     : null;
     final previewHtml = previewKind == null
         ? ''
-        : '<button class="action preview-button" type="button" data-id="$safeId" data-kind="$previewKind" data-name="$safeName">预览</button>';
+        : '<button class="action preview-button" type="button" data-id="$safeId" data-kind="$previewKind" data-name="$safeName" aria-label="预览 $safeName">预览</button>';
     html.write(
-      '''<div class="file-card kind-${type.kind}" data-file-id="$safeId" data-name="$safeName" data-size="${file.size < 0 ? 0 : file.size}" data-path="${_escapeHtml(path ?? '')}" data-preview-kind="${previewKind ?? ''}"><input id="select-$safeId" class="file-select" type="checkbox" value="$safeId" aria-label="选择 $safeName">
-<span class="file-icon" aria-hidden="true">${type.icon}</span><span class="file-info"><label class="file-name" for="select-$safeId">$safeName</label>$pathHtml<span class="file-meta"><span class="file-kind">${type.label}</span><span>$size</span></span></span><div class="file-actions">$previewHtml<a class="download-arrow" href="/file/$safeId" download="$safeName" aria-label="下载 $safeName">下载</a></div></div>\n''',
+      '''<div class="file-card kind-${type.kind}" role="listitem" data-file-id="$safeId" data-name="$safeName" data-size="${file.size < 0 ? 0 : file.size}" data-path="${_escapeHtml(path ?? '')}" data-preview-kind="${previewKind ?? ''}"><input id="select-$safeId" class="file-select" type="checkbox" value="$safeId" aria-label="选择 $safeName">
+<span class="file-icon" aria-hidden="true">${type.icon}</span><span class="file-info"><label class="file-name" for="select-$safeId">$safeName</label>$pathHtml<span class="file-meta"><span class="file-kind">${type.label}</span><span>$size</span></span></span><div class="file-actions">$previewHtml<a class="download-arrow" href="/file/$safeId" aria-label="下载 $safeName">下载</a></div></div>\n''',
     );
   }
   html.write(
       '''</div><p class="download-note">文件保存位置由当前浏览器的下载设置决定。</p></section>
 <aside aria-label="上传文件与连接提示">
-<section class="upload-panel" id="upload-panel" aria-labelledby="upload-heading" aria-busy="false">
+<section class="upload-panel" id="upload-panel" aria-labelledby="upload-heading">
 <p class="upload-direction"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 7 12 3l4 4M12 3v12M4 15v4a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-4"/></svg>当前设备 → 电脑</p>
 <h2 id="upload-heading">上传至电脑</h2><p class="upload-intro">选择文件，发送到这台电脑的接收目录。</p>
 <div class="upload-controls"><div><label class="picker-label" for="upload-files">选择上传文件</label><input class="upload-picker" id="upload-files" type="file" multiple aria-label="选择上传到电脑的文件" aria-describedby="upload-help"><p class="upload-limit" id="upload-limit">支持多选 · 单文件最大 1 GiB</p></div><button class="upload-button" id="upload-button" type="button" disabled>上传到电脑</button></div>
 <p class="upload-summary" id="upload-summary" role="status" aria-live="polite">选择文件后，点击上传到电脑。</p>
+<p class="upload-recovery-warning" id="upload-recovery-warning" role="status" aria-live="polite" hidden></p>
 <ul class="upload-list" id="upload-list" aria-label="上传文件及进度"></ul>
-<details class="upload-details"><summary>上传限制与保存说明</summary><p class="upload-help" id="upload-help">可多选文件，按顺序逐个上传，单文件最大 1 GiB（1,073,741,824 字节）。上传成功后文件会自动保存到电脑的接收目录，无需在电脑上逐个确认；请以每个文件的成功或失败反馈为准。网络中断可点击「继续上传」。刷新或重新打开页面后，需重新选择原文件续传，浏览器不会自动保留文件访问权限。上传文件归属于当前传输。</p></details>
+<details class="upload-details"><summary>上传限制与保存说明</summary><p class="upload-help" id="upload-help">可多选文件，按顺序逐个上传，单文件最大 1 GiB（1,073,741,824 字节）。上传成功后文件会自动保存到电脑的接收目录，无需在电脑上逐个确认；请以每个文件的成功或失败反馈为准。网络中断可点击「继续上传」。刷新或重新打开页面后，需重新选择原文件续传。如果浏览器允许，会在当前标签页本机保存最多 64 个文件指纹与续传编号（不含文件内容），成功或取消后会清除；刷新后仍需重新选择文件。上传文件归属于当前传输。</p></details>
 <noscript><p class="upload-help">上传功能需要启用 JavaScript；文件下载仍可直接使用。</p></noscript>
 </section><p class="network-note"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true"><path d="M2 8a16 16 0 0 1 20 0M5 12a11 11 0 0 1 14 0M8.5 16a5.5 5.5 0 0 1 7 0"/><circle cx="12" cy="20" r="1" fill="currentColor" stroke="none"/></svg><span><strong>请连接同一 Wi-Fi</strong><br>传输时请保持电脑上的 LanDrop 和本页面打开。</span></p></aside>
 </div><footer class="footer"><span>LanDrop · 局域网文件传输</span><span>文件通过此电脑的本地服务传输</span></footer></main>
-<dialog id="preview-dialog" aria-labelledby="preview-title"><div class="preview-header"><h2 id="preview-title">文件预览</h2><button class="action" id="preview-close" type="button" autofocus aria-label="关闭预览">关闭</button></div><div id="preview-media"></div><p class="upload-help">媒体格式支持取决于浏览器；无法播放时请下载文件。</p></dialog>
+<dialog id="preview-dialog" aria-labelledby="preview-title"><div class="preview-header"><h2 id="preview-title">文件预览</h2><button class="action" id="preview-close" type="button" autofocus aria-label="关闭预览">关闭</button></div><div id="preview-media" aria-busy="false"></div><p id="preview-status" class="preview-status" role="status" aria-live="polite" aria-atomic="true"></p><p class="upload-help">媒体格式支持取决于浏览器；无法播放时请下载文件。</p></dialog>
 <div class="toast" id="download-toast" role="status" aria-live="polite"></div>
 <script>
 (function () {
@@ -425,6 +433,25 @@ dialog::backdrop{background:rgba(10,16,30,.65)}
   var checks = Array.from(document.querySelectorAll('.file-select'));
   var all = document.getElementById('select-all');
   var zip = document.getElementById('zip-download');
+  var zipCancel = document.getElementById('zip-cancel');
+  var zipBaseHref = '/download.zip';
+  var zipCancelTokens = Object.create(null);
+  // Direct attachment downloads expose no completion callback; bound stale IDs.
+  var maxRememberedZipTokens = 32;
+  function newZipToken() {
+    try {
+      var crypto = window.crypto;
+      if (!crypto) return null;
+      if (typeof crypto.randomUUID === 'function') return crypto.randomUUID().toLowerCase();
+      if (typeof crypto.getRandomValues !== 'function') return null;
+      var bytes = new Uint8Array(16);
+      crypto.getRandomValues(bytes);
+      bytes[6] = bytes[6] & 15 | 64;
+      bytes[8] = bytes[8] & 63 | 128;
+      var hex = Array.from(bytes, function (b) { return b.toString(16).padStart(2, '0'); }).join('');
+      return hex.slice(0,8) + '-' + hex.slice(8,12) + '-' + hex.slice(12,16) + '-' + hex.slice(16,20) + '-' + hex.slice(20);
+    } catch (_) { return null; }
+  }
   function selection() {
     var selected = checks.filter(function (c) { return c.checked; });
     all.disabled = checks.length === 0;
@@ -432,12 +459,16 @@ dialog::backdrop{background:rgba(10,16,30,.65)}
     all.checked = checks.length > 0 && selected.length === checks.length;
     all.indeterminate = selected.length > 0 && !all.checked;
     var counter = document.getElementById('selection-count');
-    counter.textContent = '已选 ' + selected.length + ' 个';
-    if (counter.animate && !(window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches)) {
-      counter.animate([{transform:'translateY(2px)',opacity:.5},{transform:'none',opacity:1}],{duration:160,easing:'ease-out'});
+    var counterText = '已选 ' + selected.length + ' 个';
+    if (counter.textContent !== counterText) {
+      counter.textContent = counterText;
+      if (counter.animate && !(window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches)) {
+        counter.animate([{transform:'translateY(2px)',opacity:.5},{transform:'none',opacity:1}],{duration:160,easing:'ease-out'});
+      }
     }
     all.parentElement.parentElement.classList.toggle('has-selection', selected.length > 0);
-    zip.href = '/download.zip' + (selected.length ? '?ids=' + selected.map(function (c) { return c.value; }).join(',') : '');
+    zipBaseHref = '/download.zip' + (selected.length ? '?ids=' + selected.map(function (c) { return c.value; }).join(',') : '');
+    zip.href = zipBaseHref;
     zip.textContent = selected.length ? '打包下载所选' : '下载全部 ZIP';
   }
   all.disabled = checks.length === 0;
@@ -445,7 +476,52 @@ dialog::backdrop{background:rgba(10,16,30,.65)}
   all.addEventListener('change', function () { checks.forEach(function (c) { c.checked = all.checked; }); selection(); });
   checks.forEach(function (c) { c.addEventListener('change', selection); });
   document.querySelectorAll('.download-arrow, #zip-download').forEach(function (link) {
-    link.addEventListener('click', function () { notify('已请求下载，请查看浏览器下载列表。'); });
+    link.addEventListener('click', function (event) {
+      var zipLimitReached = false;
+      if (link === zip) {
+        var primaryClick = !event || event.button === undefined ||
+          (event.button === 0 && !event.ctrlKey && !event.metaKey && !event.shiftKey && !event.altKey);
+        if (primaryClick && window.location && typeof window.location.assign === 'function') {
+          var targetHref = zipBaseHref;
+          var pendingCount = Object.keys(zipCancelTokens).length;
+          var token = newZipToken();
+          if (token && uuid(token) && pendingCount < maxRememberedZipTokens) {
+            zipCancelTokens[token] = true;
+            zipCancel.hidden = false;
+            targetHref += (targetHref.indexOf('?') >= 0 ? '&' : '?') + 'job=' + token;
+          } else if (pendingCount >= maxRememberedZipTokens) {
+            zipLimitReached = true;
+          }
+          if (event && typeof event.preventDefault === 'function') event.preventDefault();
+          window.location.assign(targetHref);
+        }
+      }
+      notify(zipLimitReached
+        ? '待取消 ZIP 任务较多，本次下载仍会继续，但无法通过此页取消。'
+        : '已请求下载，请查看浏览器下载列表。');
+    });
+  });
+  function cancelZipToken(token) {
+    var url = '/download.zip/cancel?job=' + encodeURIComponent(token);
+    var sent = false;
+    try {
+      sent = !!(window.navigator && typeof window.navigator.sendBeacon === 'function' &&
+        window.navigator.sendBeacon(url));
+    } catch (_) {}
+    if (!sent) {
+      try {
+        var pending = fetch(url, {method:'POST', keepalive:true});
+        if (pending && typeof pending.catch === 'function') pending.catch(function () {});
+      } catch (_) {}
+    }
+  }
+  zipCancel.addEventListener('click', function () {
+    var tokens = Object.keys(zipCancelTokens);
+    tokens.forEach(cancelZipToken);
+    zipCancelTokens = Object.create(null);
+    zipCancel.hidden = true;
+    zip.href = zipBaseHref;
+    if (tokens.length) notify('已请求取消本页 ZIP 下载；已完成的任务会被忽略。');
   });
   function uuid(value) {
     if (typeof value !== 'string') return false;
@@ -456,10 +532,19 @@ dialog::backdrop{background:rgba(10,16,30,.65)}
   }
   var dialog = document.getElementById('preview-dialog');
   var mediaBox = document.getElementById('preview-media');
-  var opener, media, previewId, closing = false, closeTimer;
+  var previewStatus = document.getElementById('preview-status');
+  var opener, media, previewId, activePreviewKind, closing = false, closeTimer;
+  function setPreviewStatus(message, state) {
+    previewStatus.textContent = message;
+    if (state) previewStatus.setAttribute('data-state', state);
+    else previewStatus.removeAttribute('data-state');
+  }
   function stopMedia() {
     previewId = null;
-    if (!media) return;
+    activePreviewKind = null;
+    mediaBox.setAttribute('aria-busy', 'false');
+    setPreviewStatus('');
+    if (!media) { mediaBox.textContent = ''; return; }
     if (media.pause) media.pause();
     media.removeAttribute('src');
     if (media.load) media.load();
@@ -484,15 +569,31 @@ dialog::backdrop{background:rgba(10,16,30,.65)}
       opener = button;
       stopMedia();
       previewId = id;
-      document.getElementById('preview-title').textContent = button.getAttribute('data-name');
-      media = document.createElement(kind === 'image' ? 'img' : kind);
-      if (kind === 'image') media.alt = button.getAttribute('data-name');
-      else { media.controls = true; media.preload = 'metadata'; }
-      media.src = '/file/' + id + '?inline=1';
-      mediaBox.appendChild(media);
+      activePreviewKind = kind;
+      var name = button.getAttribute('data-name') || '';
+      document.getElementById('preview-title').textContent = name;
+      var currentMedia = document.createElement(kind === 'image' ? 'img' : kind);
+      media = currentMedia;
+      if (kind === 'image') currentMedia.alt = name;
+      else { currentMedia.controls = true; currentMedia.preload = 'metadata'; }
+      function updatePreviewStatus(message, state) {
+        if (media !== currentMedia || previewId !== id || !dialog.open) return;
+        setPreviewStatus(message, state);
+        mediaBox.setAttribute('aria-busy', state === 'loading' ? 'true' : 'false');
+      }
+      currentMedia.addEventListener(kind === 'image' ? 'load' : kind === 'video' ? 'loadeddata' : 'loadedmetadata', function () {
+        updatePreviewStatus('', null);
+      });
+      currentMedia.addEventListener('error', function () {
+        updatePreviewStatus('预览失败，请下载文件。', 'error');
+      });
+      mediaBox.appendChild(currentMedia);
+      mediaBox.setAttribute('aria-busy', 'true');
       dialog.showModal();
+      setPreviewStatus('预览加载中…', 'loading');
       window.requestAnimationFrame(function () { dialog.classList.add('visible'); });
       document.getElementById('preview-close').focus();
+      currentMedia.src = '/file/' + id + '?inline=1';
     });
   }
   document.querySelectorAll('.preview-button').forEach(bindPreview);
@@ -536,7 +637,7 @@ dialog::backdrop{background:rgba(10,16,30,.65)}
     records.set(data.id, record(row, data));
   });
   function createRecord(data) {
-    var row = element('div','file-card');
+    var row = element('div','file-card'); row.setAttribute('role','listitem');
     var check = element('input','file-select',row); check.type = 'checkbox'; check.value = data.id; check.id = 'select-' + data.id;
     check.addEventListener('change',selection);
     element('span','file-icon',row).setAttribute('aria-hidden','true');
@@ -560,11 +661,38 @@ dialog::backdrop{background:rgba(10,16,30,.65)}
     r.download.setAttribute('download',data.name); r.download.setAttribute('aria-label','下载 ' + data.name);
     if (data.previewKind) {
       if (!r.preview) { r.preview = element('button','action preview-button'); r.preview.type = 'button'; r.preview.textContent = '预览'; r.actions.insertBefore(r.preview,r.download); bindPreview(r.preview); }
-      r.preview.setAttribute('data-id',data.id); r.preview.setAttribute('data-kind',data.previewKind); r.preview.setAttribute('data-name',data.name);
+      r.preview.setAttribute('data-id',data.id); r.preview.setAttribute('data-kind',data.previewKind); r.preview.setAttribute('data-name',data.name); r.preview.setAttribute('aria-label','预览 ' + data.name);
     } else if (r.preview) { r.preview.remove(); r.preview = null; }
+    if (previewId === data.id) {
+      if (!data.previewKind || data.previewKind !== activePreviewKind) closePreview();
+      else {
+        document.getElementById('preview-title').textContent = data.name;
+        if (media && typeof media.alt === 'string') media.alt = data.name;
+      }
+    }
     r.data = data;
   }
   var lastManifest = JSON.stringify([document.getElementById('page-title').textContent,Array.from(records.values()).map(function (r) { return r.data; })]);
+  function hasClass(node, name) {
+    return !!node && String(node.className || '').split(/\\s+/).includes(name);
+  }
+  function fileRows() {
+    return Array.from(fileList.children).filter(function (node) { return hasClass(node,'file-card'); });
+  }
+  function containsNode(parent, node) {
+    while (node) { if (node === parent) return true; node = node.parentElement; }
+    return false;
+  }
+  function focusControlInRow(row, preferredSelector) {
+    if (!row) return null;
+    var preferred = preferredSelector ? row.querySelector(preferredSelector) : null;
+    if (preferred && !preferred.disabled && preferred.focus) return preferred;
+    for (var selector of ['.file-select','.preview-button','.download-arrow']) {
+      var candidate = row.querySelector(selector);
+      if (candidate && !candidate.disabled && candidate.focus) return candidate;
+    }
+    return null;
+  }
   function reconcile(manifest) {
     if (!manifest || typeof manifest.title !== 'string' || !Array.isArray(manifest.files)) throw new Error('Invalid manifest');
     var seen = new Set(), files = manifest.files.map(function (f) {
@@ -574,7 +702,21 @@ dialog::backdrop{background:rgba(10,16,30,.65)}
     });
     var signature = JSON.stringify([manifest.title,files]);
     if (signature === lastManifest) return;
+    var previousIds = new Set(records.keys());
+    var nextIds = new Set(files.map(function (file) { return file.id; }));
+    var addedCount = files.reduce(function (count, file) {
+      return count + (previousIds.has(file.id) ? 0 : 1);
+    }, 0);
+    var removedCount = Array.from(previousIds).reduce(function (count, id) {
+      return count + (nextIds.has(id) ? 0 : 1);
+    }, 0);
     var focused = document.activeElement;
+    var previousRows = fileRows();
+    var focusedRowIndex = previousRows.findIndex(function (row) { return containsNode(row,focused); });
+    var focusedRow = focusedRowIndex >= 0 ? previousRows[focusedRowIndex] : null;
+    var focusedControlSelector = hasClass(focused,'file-select') ? '.file-select'
+      : hasClass(focused,'preview-button') ? '.preview-button'
+      : hasClass(focused,'download-arrow') ? '.download-arrow' : null;
     if (previewId && !seen.has(previewId)) closePreview();
     records.forEach(function (r,id) { if (!seen.has(id)) { r.row.remove(); records.delete(id); } });
     files.forEach(function (data,index) {
@@ -585,7 +727,7 @@ dialog::backdrop{background:rgba(10,16,30,.65)}
     });
     var empty = document.getElementById('file-empty');
     if (!files.length && !empty) {
-      empty = element('div','empty',fileList); empty.id = 'file-empty';
+      empty = element('div','empty',fileList); empty.id = 'file-empty'; empty.setAttribute('role','listitem');
       element('p','',empty).textContent = '暂无可下载的文件';
       element('p','',empty).textContent = '请在电脑上添加要分享的文件。';
     } else if (files.length && empty) empty.remove();
@@ -595,7 +737,27 @@ dialog::backdrop{background:rgba(10,16,30,.65)}
     var title = document.getElementById('page-title');
     if (title.textContent !== manifest.title) { title.textContent = manifest.title; document.title = manifest.title + ' · LanDrop 文件传输'; }
     selection();
-    if (focused && focused.isConnected && document.activeElement !== focused && focused.focus) focused.focus({preventScroll:true});
+    if (addedCount || removedCount) {
+      var announcement = [];
+      if (addedCount) announcement.push('新增 ' + addedCount + ' 个文件');
+      if (removedCount) announcement.push('移除 ' + removedCount + ' 个文件');
+      announcement.push('当前共 ' + files.length + ' 个文件。');
+      document.getElementById('file-list-announcement').textContent = announcement.join('，');
+    }
+    if (focused && focused.isConnected && document.activeElement !== focused && focused.focus) {
+      focused.focus({preventScroll:true});
+    } else if (focusedRow && !focused.isConnected) {
+      var currentRows = fileRows();
+      var currentIndex = currentRows.indexOf(focusedRow);
+      var targetRow = currentIndex >= 0 ? focusedRow
+        : currentRows.length ? currentRows[Math.min(focusedRowIndex,currentRows.length-1)] : null;
+      var target = focusControlInRow(targetRow,focusedControlSelector);
+      if (target) target.focus({preventScroll:true});
+      else if (!currentRows.length) {
+        var heading = document.getElementById('download-heading');
+        if (heading && heading.focus) heading.focus({preventScroll:true});
+      }
+    }
     lastManifest = signature;
   }
   var pollTimer, manifestRequest;
@@ -680,18 +842,27 @@ dialog::backdrop{background:rgba(10,16,30,.65)}
       reader.onerror = function () { reject(new Error('无法读取本地文件')); }; reader.readAsArrayBuffer(blob);
     });
   }
-  async function fingerprint(file) {
-    var metadata = new TextEncoder().encode(JSON.stringify([file.name,file.size,file.lastModified]));
-    var first = new Uint8Array(await readBytes(file.slice(0,65536)));
-    var last = new Uint8Array(await readBytes(file.slice(Math.max(0,file.size-65536),file.size)));
-    var bytes = new Uint8Array(metadata.length + first.length + last.length);
-    bytes.set(metadata); bytes.set(first,metadata.length); bytes.set(last,metadata.length+first.length);
-    return sha256(bytes);
+  async function fingerprint(file, entry) {
+    // Hash every byte: sampling only the head/tail can resume into a different file.
+    // Per-chunk digests keep peak memory bounded; yielding lets the page repaint.
+    var chunkSize = 4 * 1024 * 1024, chunks = [];
+    for (var offset = 0; offset < file.size; offset += chunkSize) {
+      if (entry.cancelled) return null;
+      var end = Math.min(file.size,offset + chunkSize);
+      var bytes = await readBytes(file.slice(offset,end));
+      if (entry.cancelled) return null;
+      chunks.push(sha256(new Uint8Array(bytes)));
+      if (entry.cancelled) return null;
+      if (end < file.size) await new Promise(function (resolve) { window.setTimeout(resolve,0); });
+    }
+    if (entry.cancelled) return null;
+    var identity = new TextEncoder().encode(JSON.stringify([file.name,file.size,file.lastModified,chunks]));
+    return sha256(identity);
   }
   var maxUploadBytes = 1024 * 1024 * 1024, chunkBytes = 4 * 1024 * 1024;
+  var controlTimeoutMs = 120000;
   var picker = document.getElementById('upload-files');
   var uploadButton = document.getElementById('upload-button');
-  var uploadPanel = document.getElementById('upload-panel');
   var uploadList = document.getElementById('upload-list');
   var summary = document.getElementById('upload-summary');
   var totalProgress = document.createElement('progress');
@@ -714,24 +885,99 @@ dialog::backdrop{background:rgba(10,16,30,.65)}
     uploadButton.textContent = busy ? '上传中…' : entries.some(function (e) { return !e.cancelled && e.state === 'paused'; }) ? '继续上传' : '上传到电脑';
   }
   async function control(method, url, expected) {
-    var response = await fetch(url, {method:method, credentials:'same-origin', cache:'no-store'});
-    if (response.status !== expected) throw new Error('HTTP ' + response.status + '，未确认保存');
-    return expected === 204 ? null : response.json();
+    var controller = typeof window.AbortController === 'function' ? new window.AbortController() : null;
+    var init = {method:method, credentials:'same-origin', cache:'no-store'};
+    if (controller) init.signal = controller.signal;
+    var timer;
+    var operation = (async function () {
+      var response = await fetch(url, init);
+      if (response.status !== expected) {
+        var message = 'HTTP ' + response.status;
+        try { var error = await response.json(); if (error && typeof error.error === 'string') message = error.error; } catch (_) {}
+        var failure = new Error(message + '，未确认保存'); failure.status = response.status; throw failure;
+      }
+      return expected === 204 ? null : response.json();
+    }());
+    var timeout = new Promise(function (_, reject) {
+      timer = window.setTimeout(function () {
+        var failure = new Error('电脑响应超时，未确认保存'); failure.timeout = true;
+        reject(failure);
+        if (controller) controller.abort();
+      }, controlTimeoutMs);
+    });
+    try { return await Promise.race([operation,timeout]); }
+    finally { if (timer !== undefined) window.clearTimeout(timer); }
+  }
+  var uploadSessionStorageKey = 'landrop.uploadSessions.v1';
+  var maxRememberedUploadSessions = 64;
+  var uploadSessionStorageAvailable = true;
+  function reportUploadStorageFailure() {
+    if (!uploadSessionStorageAvailable) return;
+    uploadSessionStorageAvailable = false;
+    var warning = document.getElementById('upload-recovery-warning');
+    if (warning) {
+      warning.hidden = false;
+      warning.textContent = '浏览器无法可靠访问本标签页的续传记录。若上传期间或完成后响应丢失，刷新页面后可能无法自动续传或确认；请先检查电脑接收目录，再重新选择文件。';
+    }
+  }
+  try {
+    var storageProbe = window.sessionStorage;
+    var probeKey = uploadSessionStorageKey + '.probe';
+    storageProbe.setItem(probeKey,'1');
+    storageProbe.removeItem(probeKey);
+  } catch (_) { reportUploadStorageFailure(); }
+  function rememberedUploadSessions() {
+    var raw;
+    try { raw = window.sessionStorage.getItem(uploadSessionStorageKey); }
+    catch (_) { reportUploadStorageFailure(); return []; }
+    if (typeof raw !== 'string' || raw.length > 16384) return [];
+    var records;
+    try { records = JSON.parse(raw); } catch (_) { return []; }
+    if (!Array.isArray(records)) return [];
+    return records.filter(function (record) {
+      return record && typeof record.fingerprint === 'string' && /^[0-9a-f]{64}\$/.test(record.fingerprint) && uuid(record.id);
+    }).slice(-maxRememberedUploadSessions);
+  }
+  function findRememberedUploadSession(fingerprint) {
+    var records = rememberedUploadSessions();
+    for (var i = records.length - 1; i >= 0; i--) {
+      if (records[i].fingerprint === fingerprint) return records[i].id;
+    }
+    return null;
+  }
+  function rememberUploadSession(fingerprint, id) {
+    if (typeof fingerprint !== 'string' || !/^[0-9a-f]{64}\$/.test(fingerprint) || !uuid(id)) return;
+    try {
+      var records = rememberedUploadSessions().filter(function (record) { return record.fingerprint !== fingerprint; });
+      records.push({fingerprint:fingerprint,id:id});
+      if (records.length > maxRememberedUploadSessions) records = records.slice(-maxRememberedUploadSessions);
+      window.sessionStorage.setItem(uploadSessionStorageKey,JSON.stringify(records));
+    } catch (_) { reportUploadStorageFailure(); }
+  }
+  function forgetRememberedUploadSession(fingerprint, id) {
+    if (typeof fingerprint !== 'string' || !id) return;
+    try {
+      var records = rememberedUploadSessions().filter(function (record) { return record.fingerprint !== fingerprint || record.id !== id; });
+      if (records.length) window.sessionStorage.setItem(uploadSessionStorageKey,JSON.stringify(records));
+      else window.sessionStorage.removeItem(uploadSessionStorageKey);
+    } catch (_) { reportUploadStorageFailure(); }
   }
   function validate(entry, data) {
     if (!data || !uuid(data.id) || (entry.id && data.id !== entry.id) || data.size !== entry.file.size ||
         !Number.isSafeInteger(data.offset) || data.offset < entry.offset || data.offset > data.size) throw new Error('电脑返回的续传信息无效，未确认保存');
     entry.id = data.id; entry.offset = data.offset; entry.sent = data.offset;
+    rememberUploadSession(entry.fingerprint, entry.id);
     entry.progress.value = data.size ? data.offset / data.size * 100 : 0;
+    entry.progress.setAttribute('aria-label',entry.file.name+' 上传进度');
     updateTotal();
   }
   async function removeSession(entry) {
     if (!entry.id) return;
-    if (!entry.deleting) entry.deleting = control('DELETE','/uploads/'+entry.id,204).catch(function () { entry.deleting = null; throw new Error('取消未确认，请检查连接后再次取消以清理临时文件'); });
+    if (!entry.deleting) entry.deleting = control('DELETE','/uploads/'+entry.id+'?cancel=1',204).catch(function (error) { entry.deleting = null; if (error.status === 409) throw error; throw new Error('取消未确认，临时文件尚未确认清理。恢复接收目录后重试，必要时在电脑端检查恢复提示'); });
     await entry.deleting;
   }
   async function cancel(entry) {
-    if (entry.state === 'success') return;
+    if (entry.state === 'success' || entry.completing) return;
     entry.cancelled = true;
     if (entry.xhr) entry.xhr.abort();
     state(entry,'cancelling','正在取消并清理临时文件…');
@@ -746,8 +992,15 @@ dialog::backdrop{background:rgba(10,16,30,.65)}
         }
       }
       await removeSession(entry);
+      forgetRememberedUploadSession(entry.fingerprint,entry.id);
       state(entry,'cancelled','上传已取消，临时文件已清理。');
-    } catch (error) { state(entry,'paused',error.message); entry.cancel.hidden = false; }
+    } catch (error) {
+      if (error.status === 409) {
+        entry.progress.value = 100; entry.sent = entry.file.size; updateTotal();
+        forgetRememberedUploadSession(entry.fingerprint,entry.id);
+        state(entry,'success','电脑已确认文件保存，无法取消。');
+      } else { state(entry,'paused',error.message); entry.cancel.hidden = false; }
+    }
     refreshButton();
   }
   picker.addEventListener('change', function () {
@@ -760,7 +1013,7 @@ dialog::backdrop{background:rgba(10,16,30,.65)}
       var progress = document.createElement('progress'); progress.className = 'upload-progress'; progress.max = 100; progress.value = 0;
       progress.setAttribute('aria-label',file.name+' 上传进度');
       var actions = document.createElement('div'); actions.className = 'upload-actions';
-      var cancelButton = document.createElement('button'); cancelButton.type = 'button'; cancelButton.className = 'action'; cancelButton.textContent = '取消';
+      var cancelButton = document.createElement('button'); cancelButton.type = 'button'; cancelButton.className = 'action'; cancelButton.textContent = '取消'; cancelButton.setAttribute('aria-label','取消上传 '+file.name);
       var entry = {file:file,row:row,status:status,progress:progress,cancel:cancelButton,offset:0,sent:0};
       cancelButton.addEventListener('click',function () { return cancel(entry); });
       actions.appendChild(cancelButton); row.appendChild(name); row.appendChild(status); row.appendChild(progress); row.appendChild(actions); uploadList.appendChild(row); entries.push(entry);
@@ -785,7 +1038,11 @@ dialog::backdrop{background:rgba(10,16,30,.65)}
       });
       xhr.addEventListener('load',function () {
         if (xhr.status === 409) { finish(null,{conflict:true}); return; }
-        if (xhr.status !== 200) { finish(new Error('HTTP '+xhr.status+'，未确认保存')); return; }
+        if (xhr.status !== 200) {
+          var message = 'HTTP ' + xhr.status;
+          try { var error = JSON.parse(xhr.responseText); if (error && typeof error.error === 'string') message = error.error; } catch (_) {}
+          finish(new Error(message + '，未确认保存')); return;
+        }
         try { finish(null,JSON.parse(xhr.responseText)); } catch (_) { finish(new Error('电脑返回的续传信息无效，未确认保存')); }
       });
       ['error','abort','timeout'].forEach(function (type) { xhr.addEventListener(type,function () { finish(new Error(type === 'abort' && entry.cancelled ? '主动取消' : '网络中断或超时，上传已暂停，未确认保存')); }); });
@@ -796,18 +1053,38 @@ dialog::backdrop{background:rgba(10,16,30,.65)}
   function createUrl(entry) {
     return '/uploads?name='+encodeURIComponent(entry.file.name)+'&size='+entry.file.size+'&fingerprint='+entry.fingerprint;
   }
+  async function resumeSession(entry, id) {
+    entry.id = id;
+    try { validate(entry,await control('GET','/uploads/'+id,200)); }
+    catch (error) {
+      if (error.status !== 404) throw error;
+      forgetRememberedUploadSession(entry.fingerprint,id);
+      entry.id = null; entry.offset = 0; entry.sent = 0;
+      var stale = new Error('恢复记录已失效，文件可能已保存。请先检查电脑接收目录，再重新选择文件。');
+      stale.staleSession = true;
+      throw stale;
+    }
+  }
   async function uploadOne(entry) {
     try {
-      entry.cancelled = false; state(entry,'uploading','正在检查续传位置…');
+      entry.cancelled = false;
+      state(entry,'uploading',entry.id ? '正在检查续传位置…' : '正在校验完整文件内容…');
       if (!entry.id) {
+        entry.progress.removeAttribute('value');
+        entry.progress.setAttribute('aria-label',entry.file.name+' 文件校验进度');
         entry.creating = (async function () {
-          entry.fingerprint = await fingerprint(entry.file);
+          entry.fingerprint = await fingerprint(entry.file,entry);
           if (entry.cancelled) return;
-          var data = await control('POST',createUrl(entry),201);
-          validate(entry,data);
+          var rememberedId = findRememberedUploadSession(entry.fingerprint);
+          if (rememberedId) {
+            await resumeSession(entry,rememberedId);
+          } else {
+            var data = await control('POST',createUrl(entry),201);
+            validate(entry,data);
+          }
         }());
         await entry.creating; entry.creating = null;
-      } else validate(entry,await control('GET','/uploads/'+entry.id,200));
+      } else await resumeSession(entry,entry.id);
       if (entry.cancelled) return;
       entry.started = performance.now(); entry.base = entry.offset;
       var conflicts = 0;
@@ -825,21 +1102,30 @@ dialog::backdrop{background:rgba(10,16,30,.65)}
         }
       }
       if (entry.cancelled) return;
-      state(entry,'uploading','数据已发送，等待电脑确认完整保存…');
-      var saved = await control('POST','/uploads/'+entry.id+'/complete',201);
+      state(entry,'uploading','数据已发送，等待电脑确认完整保存，此阶段无法取消…');
+      entry.completing = true; entry.cancel.disabled = true;
+      var saved;
+      try { saved = await control('POST','/uploads/'+entry.id+'/complete',201); }
+      finally { entry.completing = false; entry.cancel.disabled = ['success','cancelled','error'].includes(entry.state); }
       if (entry.cancelled) return;
       if (!saved || typeof saved.name !== 'string' || !saved.name.length || saved.size !== entry.file.size) throw new Error('电脑返回的保存信息无效，未确认保存');
       entry.progress.value = 100; entry.sent = entry.file.size; updateTotal();
+      forgetRememberedUploadSession(entry.fingerprint,entry.id);
       state(entry,'success','上传成功，已自动保存到电脑：'+saved.name);
     } catch (error) {
       if (entry.cancelled) return;
+      if (error.staleSession) {
+        entry.sent = 0; entry.progress.value = 0; updateTotal();
+        state(entry,'error',error.message);
+        return;
+      }
       entry.sent = entry.offset; entry.progress.value = entry.file.size ? entry.offset/entry.file.size*100 : 0; updateTotal();
       state(entry,'paused','上传暂停，未确认保存：'+error.message+'。检查连接后点击「继续上传」。');
     }
   }
   uploadButton.addEventListener('click',async function () {
     if (busy || uploadButton.disabled) return;
-    busy = true; picker.disabled = true; refreshButton(); uploadPanel.setAttribute('aria-busy','true');
+    busy = true; picker.disabled = true; refreshButton();
     for (var index = 0; index < entries.length; index++) {
       var entry = entries[index];
       if (!['pending','paused'].includes(entry.state) || entry.cancelled) continue;
@@ -850,7 +1136,7 @@ dialog::backdrop{background:rgba(10,16,30,.65)}
     var paused = entries.filter(function (e) { return e.state === 'paused'; }).length;
     var failed = entries.filter(function (e) { return e.state === 'error'; }).length;
     summary.textContent = '处理完成：成功 '+succeeded+' 个，暂停 '+paused+' 个，失败 '+failed+' 个。'+(paused ? '暂停文件未确认保存，可继续上传。' : '请以每个文件的保存反馈为准。');
-    busy = false; picker.disabled = false; refreshButton(); uploadPanel.setAttribute('aria-busy','false');
+    busy = false; picker.disabled = false; refreshButton();
   });
 }());
 </script>

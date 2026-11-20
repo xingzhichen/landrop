@@ -20,8 +20,12 @@ class ImportPathsDialog extends StatefulWidget {
 }
 
 class _ImportPathsDialogState extends State<ImportPathsDialog> {
+  static const _maxTitleLength = 80;
   late final TextEditingController _title = TextEditingController(
-      text: widget.paths.length == 1 ? p.basename(widget.paths.first) : '拖拽分享');
+      text: (widget.paths.length == 1 ? p.basename(widget.paths.first) : '拖拽分享')
+          .characters
+          .take(_maxTitleLength)
+          .toString());
   String? _pageId;
   @override
   void dispose() {
@@ -76,7 +80,7 @@ class _ImportPathsDialogState extends State<ImportPathsDialog> {
                               child: TextField(
                                   key: const ValueKey('import-page-title'),
                                   controller: _title,
-                                  maxLength: 80,
+                                  maxLength: _maxTitleLength,
                                   onChanged: (_) => setState(() {}),
                                   decoration:
                                       const InputDecoration(labelText: '传输名称')))
@@ -179,13 +183,18 @@ class _ReceiveOptionsDialogState extends State<ReceiveOptionsDialog> {
                   if (_picking)
                     const Padding(
                         padding: EdgeInsets.only(top: 12),
-                        child: LinearProgressIndicator()),
+                        child: WorkspaceProgress(
+                            linear: true, label: '正在选择接收文件夹')),
                   if (_error != null)
                     Padding(
                         padding: const EdgeInsets.only(top: 12),
-                        child: Text(_error!,
-                            style: TextStyle(
-                                color: Theme.of(context).colorScheme.error))),
+                        child: Semantics(
+                            container: true,
+                            liveRegion: true,
+                            child: Text(_error!,
+                                style: TextStyle(
+                                    color:
+                                        Theme.of(context).colorScheme.error)))),
                   const SizedBox(height: 16),
                   SwitchListTile.adaptive(
                       key: const ValueKey('organize-by-date'),

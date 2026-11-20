@@ -2,7 +2,9 @@
 import 'dart:async';
 
 import 'package:file_picker/file_picker.dart';
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:landrop/create_page_dialog.dart';
@@ -41,6 +43,15 @@ class _WorkspaceController extends LanDropController {
   final receiveOptions =
       <({SharePage page, String? directory, bool organizeByDate})>[];
   final fileSelections = <List<PlatformFile>>[];
+  var refreshCalls = 0;
+  Completer<void>? refreshBarrier;
+  Completer<void>? startEntered;
+  Completer<void>? startBarrier;
+  @override
+  Future<void> refreshAddresses() async {
+    refreshCalls++;
+    if (refreshBarrier != null) await refreshBarrier!.future;
+  }
 
   @override
   Future<String> receiveDirectoryFor(SharePage page) async =>
@@ -94,6 +105,10 @@ class _WorkspaceController extends LanDropController {
   @override
   Future<void> start(SharePage page) async {
     events.add('start:${page.title}');
+    final entered = startEntered;
+    if (entered != null && !entered.isCompleted) entered.complete();
+    final barrier = startBarrier;
+    if (barrier != null) await barrier.future;
     page.running = true;
     notifyListeners();
   }
@@ -245,6 +260,70 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
+  testWidgets('drop import completion respects navigation during startup',
+      (tester) async {
+    final fixture = await _mount(tester);
+    final startEntered = Completer<void>();
+    final releaseStart = Completer<void>();
+    fixture.controller.startEntered = startEntered;
+    fixture.controller.startBarrier = releaseStart;
+    addTearDown(() {
+      if (!releaseStart.isCompleted) releaseStart.complete();
+    });
+
+    fixture.shell.drop!(['/drop/late-import.pdf']);
+    await tester.pumpAndSettle();
+    await tester.enterText(
+        find.byKey(const ValueKey('import-page-title')), '延迟导入');
+    await tester
+        .ensureVisible(find.byKey(const ValueKey('confirm-import-paths')));
+    await tester.pump();
+    await tester.tap(find.byKey(const ValueKey('confirm-import-paths')));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 500));
+    expect(startEntered.isCompleted, isTrue);
+
+    await tester.tap(find.byKey(const ValueKey('navigation-item-1')));
+    await tester.pump();
+    expect(find.text('工作台  /  应用设置'), findsOneWidget);
+
+    releaseStart.complete();
+    await tester.pumpAndSettle();
+
+    expect(fixture.controller.pages.last.running, isTrue);
+    expect(
+        fixture.controller.addedPaths.single.paths, ['/drop/late-import.pdf']);
+    expect(find.text('工作台  /  应用设置'), findsOneWidget);
+    expect(find.byKey(const ValueKey('back-to-transfers')), findsNothing);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('long dragged basename is truncated before title submission',
+      (tester) async {
+    final fixture = await _mount(tester);
+    // 79 CJK characters plus a decomposed accent, extra text and extension
+    // stay below common 255-byte filename limits while exceeding 80 graphemes.
+    final longName = '${List.filled(79, '字').join()}e\u0301x.txt';
+    final expectedTitle = longName.characters.take(80).toString();
+    expect(expectedTitle.endsWith('e\u0301'), isTrue);
+    fixture.shell.drop!(['/drop/$longName']);
+    await tester.pumpAndSettle();
+
+    final titleField = tester
+        .widget<TextField>(find.byKey(const ValueKey('import-page-title')));
+    expect(titleField.maxLength, 80);
+    expect(titleField.controller!.text, expectedTitle);
+    expect(titleField.controller!.text.characters.length, 80);
+    await _tap(tester, find.byKey(const ValueKey('confirm-import-paths')));
+
+    final submittedTitle = fixture.controller.events
+        .singleWhere((event) => event.startsWith('create:'))
+        .substring('create:'.length);
+    expect(submittedTitle, expectedTitle);
+    expect(submittedTitle.characters.length, lessThanOrEqualTo(80));
+    expect(tester.takeException(), isNull);
+  });
+
   testWidgets(
       'native drop into existing page adds paths without creating or restarting',
       (tester) async {
@@ -341,6 +420,84 @@ void main() {
     expect(fixture.controller.pages.single.organizeByDate, isFalse);
   });
 
+  testWidgets('receive-directory picker errors are announced accessibly',
+      (tester) async {
+    final semantics = tester.ensureSemantics();
+    final fixture = await _mount(tester, pickDirectory: () async {
+      throw StateError('permission denied');
+    });
+    await _openReceiveSettings(tester);
+    await _tap(tester, find.byKey(const ValueKey('choose-receive-directory')));
+
+    const message = '选择文件夹失败，请检查访问权限后重试。';
+    final error = find.text(message);
+    expect(error, findsOneWidget);
+    final data = tester.getSemantics(error).getSemanticsData();
+    expect(data.label, message);
+    expect(data.hasFlag(SemanticsFlag.isLiveRegion), isTrue);
+    expect(tester.takeException(), isNull);
+
+    semantics.dispose();
+    await tester.pumpWidget(const SizedBox.shrink());
+    expect(fixture.controller.pages, hasLength(1));
+  });
+
+  testWidgets(
+      'receive settings block conflicting edits while picker is pending',
+      (tester) async {
+    final selection = Completer<String?>();
+    addTearDown(() {
+      if (!selection.isCompleted) selection.complete(null);
+    });
+    final fixture = await _mount(tester, pickDirectory: () => selection.future);
+    await _openReceiveSettings(tester);
+    await tester.tap(find.byKey(const ValueKey('choose-receive-directory')));
+    await tester.pump();
+
+    expect(
+        tester
+            .widget<OutlinedButton>(
+                find.byKey(const ValueKey('choose-receive-directory')))
+            .onPressed,
+        isNull);
+    expect(
+        tester
+            .widget<TextButton>(find.widgetWithText(TextButton, '恢复默认位置'))
+            .onPressed,
+        isNull);
+    expect(
+        tester
+            .widget<SwitchListTile>(
+                find.byKey(const ValueKey('organize-by-date')))
+            .onChanged,
+        isNull);
+    expect(tester.widget<TextButton>(_cancel).onPressed, isNull);
+    expect(
+        tester
+            .widget<FilledButton>(
+                find.byKey(const ValueKey('save-receive-options')))
+            .onPressed,
+        isNull);
+
+    selection.complete('/chosen/late-result');
+    await tester.pumpAndSettle();
+    expect(
+        tester
+            .widget<OutlinedButton>(
+                find.byKey(const ValueKey('choose-receive-directory')))
+            .onPressed,
+        isNotNull);
+    expect(
+        tester
+            .widget<TextButton>(find.widgetWithText(TextButton, '恢复默认位置'))
+            .onPressed,
+        isNotNull);
+
+    await _tap(tester, find.text('恢复默认位置'));
+    await _tap(tester, find.byKey(const ValueKey('save-receive-options')));
+    expect(fixture.controller.receiveOptions.single.directory, isNull);
+  });
+
   testWidgets(
       'receive settings save chosen directory and organize-by-date, then restore default',
       (tester) async {
@@ -430,6 +587,42 @@ void main() {
       }
     });
   }
+
+  testWidgets('late transfer startup does not override later navigation',
+      (tester) async {
+    final fixture = await _mount(tester);
+    final startEntered = Completer<void>();
+    final releaseStart = Completer<void>();
+    fixture.controller.startEntered = startEntered;
+    fixture.controller.startBarrier = releaseStart;
+    addTearDown(() {
+      if (!releaseStart.isCompleted) releaseStart.complete();
+    });
+
+    await _tap(tester, find.byKey(const ValueKey('new-transfer')));
+    await tester.enterText(
+        find.byKey(CreatePageDialog.titleFieldKey), '延迟启动传输');
+    await tester.ensureVisible(find.byKey(CreatePageDialog.submitKey));
+    await tester.pump();
+    await tester.tap(find.byKey(CreatePageDialog.submitKey));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 500));
+    expect(find.byType(CreatePageDialog), findsNothing);
+    expect(fixture.controller.events, ['create:延迟启动传输', 'start:延迟启动传输']);
+    expect(startEntered.isCompleted, isTrue);
+
+    await tester.tap(find.byKey(const ValueKey('navigation-item-1')));
+    await tester.pump();
+    expect(find.text('工作台  /  应用设置'), findsOneWidget);
+
+    releaseStart.complete();
+    await tester.pumpAndSettle();
+
+    expect(fixture.controller.pages.last.running, isTrue);
+    expect(find.text('工作台  /  应用设置'), findsOneWidget);
+    expect(find.byKey(const ValueKey('back-to-transfers')), findsNothing);
+    expect(tester.takeException(), isNull);
+  });
 
   testWidgets('name-only creation starts empty transfer and opens its detail',
       (tester) async {
@@ -565,6 +758,37 @@ void main() {
     expect(tester.widget<OutlinedButton>(button).onPressed, isNotNull);
   });
 
+  testWidgets('async refresh restores focus after its busy state',
+      (tester) async {
+    final fixture = await _mount(tester);
+    final barrier = Completer<void>();
+    fixture.controller.refreshBarrier = barrier;
+    final button = find.widgetWithIcon(IconButton, Icons.refresh);
+    final focus = tester.widget<IconButton>(button).focusNode!;
+    focus.requestFocus();
+    await tester.pump();
+    await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+    await tester.pump();
+    expect(fixture.controller.refreshCalls, 1);
+    barrier.complete();
+    await tester.pumpAndSettle();
+    expect(focus.hasPrimaryFocus, isTrue);
+
+    final secondBarrier = Completer<void>();
+    fixture.controller.refreshBarrier = secondBarrier;
+    focus.requestFocus();
+    await tester.pump();
+    await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+    await tester.pump();
+    await tester.sendKeyEvent(LogicalKeyboardKey.tab);
+    await tester.pump();
+    final userFocus = FocusManager.instance.primaryFocus;
+    expect(userFocus, isNot(same(focus)));
+    secondBarrier.complete();
+    await tester.pumpAndSettle();
+    expect(FocusManager.instance.primaryFocus, same(userFocus));
+  });
+
   testWidgets(
       'real LanDropApp persists all appearance choices and follows live system brightness',
       (tester) async {
@@ -602,6 +826,93 @@ void main() {
         (await SharedPreferences.getInstance())
             .getString(ThemeController.preferenceKey),
         'system');
+  });
+
+  testWidgets('disabled actions do not receive hover or press motion',
+      (tester) async {
+    await tester.pumpWidget(const MaterialApp(
+      home: Scaffold(
+        body: Center(
+          child: ActionMotion(
+            child: FilledButton(
+              onPressed: null,
+              child: Text('Disabled action'),
+            ),
+          ),
+        ),
+      ),
+    ));
+    final button = find.byType(FilledButton);
+    final outerMotion = find
+        .ancestor(of: button, matching: find.byType(AnimatedContainer))
+        .first;
+    final scaleMotion =
+        find.ancestor(of: button, matching: find.byType(AnimatedScale)).first;
+    final center = tester.getCenter(button);
+    final mouse = await tester.createGesture(kind: PointerDeviceKind.mouse);
+    await mouse.addPointer(location: center);
+    await tester.pump();
+    await mouse.moveTo(center + const Offset(1, 0));
+    await tester.pump(const Duration(milliseconds: 200));
+    expect(
+        tester
+            .widget<AnimatedContainer>(outerMotion)
+            .transform!
+            .getTranslation()
+            .y,
+        0);
+    await mouse.down(center);
+    await tester.pump(const Duration(milliseconds: 120));
+    expect(tester.widget<AnimatedScale>(scaleMotion).scale, 1);
+    await mouse.up();
+    await mouse.removePointer();
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('indeterminate wait states respect reduced motion and announce',
+      (tester) async {
+    final semantics = tester.ensureSemantics();
+    void expectLiveRegion(Finder finder, String label) {
+      final data = tester.getSemantics(finder).getSemanticsData();
+      expect(data.hasFlag(SemanticsFlag.isLiveRegion), isTrue);
+      expect(data.label, contains(label));
+    }
+
+    await tester.pumpWidget(const MaterialApp(
+      home: MediaQuery(
+        data: MediaQueryData(disableAnimations: true),
+        child: Scaffold(
+          body: Column(mainAxisSize: MainAxisSize.min, children: [
+            WorkspaceProgress(label: '正在准备传输工作台…'),
+            WorkspaceProgress(linear: true, label: '正在处理操作'),
+          ]),
+        ),
+      ),
+    ));
+    expect(find.byType(CircularProgressIndicator), findsNothing);
+    expect(find.byType(LinearProgressIndicator), findsNothing);
+    expect(find.byIcon(Icons.hourglass_empty_rounded), findsNWidgets(2));
+    expect(find.text('正在准备传输工作台…'), findsOneWidget);
+    expect(find.text('正在处理操作'), findsOneWidget);
+    expectLiveRegion(find.text('正在准备传输工作台…'), '正在准备传输工作台…');
+    expectLiveRegion(find.text('正在处理操作'), '正在处理操作');
+    expect(tester.takeException(), isNull);
+
+    await tester.pumpWidget(const MaterialApp(
+      home: Scaffold(
+        body: Column(mainAxisSize: MainAxisSize.min, children: [
+          WorkspaceProgress(label: '正在准备传输工作台…'),
+          WorkspaceProgress(linear: true, label: '正在处理操作'),
+        ]),
+      ),
+    ));
+    expect(find.byType(CircularProgressIndicator), findsOneWidget);
+    expect(find.byType(LinearProgressIndicator), findsOneWidget);
+    expectLiveRegion(find.text('正在准备传输工作台…'), '正在准备传输工作台…');
+    expectLiveRegion(find.byType(LinearProgressIndicator), '正在处理操作');
+    expect(tester.takeException(), isNull);
+    semantics.dispose();
+    await tester.pumpWidget(const SizedBox.shrink());
   });
 
   testWidgets(

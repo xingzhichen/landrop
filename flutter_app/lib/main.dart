@@ -112,8 +112,12 @@ class _HomeScreenState extends State<HomeScreen> {
   static const _titles = ['我的传输', '应用设置'];
   static const _descriptions = ['创建一组传输，让电脑与手机在这里双向收发。', '设置外观、后台运行与各传输的接收位置。'];
   int _destination = 0;
+  int _navigationRevision = 0;
   bool _loading = true;
   bool _working = false;
+  final FocusNode _refreshAddressFocus =
+      FocusNode(debugLabel: 'refresh addresses');
+  final Set<String> _cancellingTransferIds = {};
   String? _selectedAddress;
   String? _startupError;
 
@@ -156,6 +160,7 @@ class _HomeScreenState extends State<HomeScreen> {
 
   @override
   void dispose() {
+    _refreshAddressFocus.dispose();
     _shell.dispose();
     if (widget.appearance == null) _appearance.dispose();
     if (widget.controller == null) _controller.dispose();
@@ -164,13 +169,34 @@ class _HomeScreenState extends State<HomeScreen> {
 
   Future<void> _perform(Future<void> Function() work) async {
     if (_working) return;
+    final focusedBefore = FocusManager.instance.primaryFocus;
+    FocusNode? fallbackFocus;
     setState(() => _working = true);
     try {
+      if (focusedBefore != null) {
+        await WidgetsBinding.instance.endOfFrame;
+        if (focusedBefore.context != null && !focusedBefore.canRequestFocus) {
+          fallbackFocus = FocusManager.instance.primaryFocus;
+        }
+      }
       await work();
     } catch (error) {
       if (mounted) _notice('操作失败：$error');
     } finally {
-      if (mounted) setState(() => _working = false);
+      if (mounted) {
+        setState(() => _working = false);
+        if (fallbackFocus != null) {
+          WidgetsBinding.instance.addPostFrameCallback((_) {
+            if (!mounted ||
+                focusedBefore!.context == null ||
+                !focusedBefore.canRequestFocus ||
+                FocusManager.instance.primaryFocus != fallbackFocus) {
+              return;
+            }
+            focusedBefore.requestFocus();
+          });
+        }
+      }
     }
   }
 
@@ -184,15 +210,18 @@ class _HomeScreenState extends State<HomeScreen> {
     final name = await showDialog<String>(
         context: context, builder: (_) => const CreatePageDialog());
     if (name == null || !mounted) return;
+    final navigationRevision = _navigationRevision;
     await _perform(() async {
       final page = await _controller.createPage(name);
       try {
         await _controller.start(page);
-        if (mounted) {
+        if (mounted && navigationRevision == _navigationRevision) {
           setState(() {
             _selectedTransferId = page.id;
             _destination = 0;
           });
+        } else if (mounted) {
+          _notice('已创建传输「${page.title}」');
         }
       } catch (_) {
         await _controller.removePage(page);
@@ -248,6 +277,7 @@ class _HomeScreenState extends State<HomeScreen> {
           builder: (_) => ImportPathsDialog(
               paths: paths, pages: List.of(_controller.pages)));
       if (choice == null || !mounted) return;
+      final navigationRevision = _navigationRevision;
       await _perform(() async {
         final isNew = choice.page == null;
         final page = choice.page ?? await _controller.createPage(choice.title);
@@ -261,10 +291,12 @@ class _HomeScreenState extends State<HomeScreen> {
           }
           if (isNew) await _controller.start(page);
           if (mounted) {
-            setState(() {
-              _destination = 0;
-              _selectedTransferId = page.id;
-            });
+            if (navigationRevision == _navigationRevision) {
+              setState(() {
+                _destination = 0;
+                _selectedTransferId = page.id;
+              });
+            }
             _notice('已添加 $added 个文件，文件夹结构已保留');
           }
         } catch (_) {
@@ -280,6 +312,10 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   Future<void> _receiveSettings(SharePage page) async {
+    if (_controller.hasConflictingPageId(page)) {
+      _notice('接收设置因传输 ID 冲突而隔离。');
+      return;
+    }
     final options = await showDialog<ReceiveOptions>(
         context: context,
         builder: (_) =>
@@ -332,8 +368,10 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   Future<void> _deletePage(SharePage page) async {
-    if (!await _confirm(
-        '删除「${page.title}」？', '此传输会停止服务并清除未完成的上传；已接收文件和电脑上的原文件不会删除。')) {
+    final detail = _controller.hasConflictingPageId(page)
+        ? '传输 ID 冲突，无法判断有歧义的共享副本归属；这会移除冲突记录并清除未完成上传，但不会自动删除已接收文件、电脑原文件或冲突记录中的共享副本。'
+        : '此传输会停止服务并清除未完成的上传；已接收文件和电脑上的原文件不会删除。';
+    if (!await _confirm('删除「${page.title}」？', detail)) {
       return;
     }
     await _perform(() async {
@@ -352,6 +390,48 @@ class _HomeScreenState extends State<HomeScreen> {
       return;
     }
     await _perform(() => _controller.removeFile(page, file));
+  }
+
+  Future<void> _cancelTransferTask(TransferTask task) async {
+    if (!_controller.canCancelTransfer(task.id)) return;
+    final detail = task.direction == 'upload'
+        ? '手机到电脑的接收会中断；未完成内容可能需要重新发送。'
+        : '电脑到手机的发送会中断；手机端可能需要重新开始。';
+    if (!await _confirm('取消「${task.name}」？', detail, confirmText: '取消传输')) {
+      return;
+    }
+    if (!_controller.canCancelTransfer(task.id)) {
+      if (mounted) _notice('传输已结束，无需取消。');
+      return;
+    }
+    await _runTransferAction(task.id);
+  }
+
+  Future<void> _abandonTransferTask(TransferTask task) async {
+    if (!_controller.canAbandonTransfer(task.id)) return;
+    const detail = '这会尝试删除未完成的手机上传数据和续传记录；已完成的接收文件不会删除。若清理失败，任务会保留，修复接收目录后可重试。';
+    if (!await _confirm('放弃「${task.name}」的续传？', detail, confirmText: '放弃续传')) {
+      return;
+    }
+    if (!_controller.canAbandonTransfer(task.id)) {
+      if (mounted) _notice('续传任务已结束，无需放弃。');
+      return;
+    }
+    await _runTransferAction(task.id);
+  }
+
+  Future<void> _runTransferAction(String id) async {
+    if (!mounted) return;
+    if (_working || _cancellingTransferIds.contains(id)) {
+      if (mounted) _notice('请等待当前操作完成后再试。');
+      return;
+    }
+    setState(() => _cancellingTransferIds.add(id));
+    try {
+      await _perform(() => _controller.cancelTransfer(id));
+    } finally {
+      if (mounted) setState(() => _cancellingTransferIds.remove(id));
+    }
   }
 
   Future<void> _refreshAddresses() async {
@@ -437,36 +517,49 @@ class _HomeScreenState extends State<HomeScreen> {
 
   Widget _navItem(int index, IconData icon, String label) {
     final selected = _destination == index;
-    return AnimatedContainer(
-        duration: motionDuration(context),
-        decoration: BoxDecoration(
-            color: selected ? _colors.primaryTint : Colors.transparent,
-            borderRadius: BorderRadius.circular(12)),
-        child: Material(
-          color: selected ? _colors.primaryTint : Colors.transparent,
-          borderRadius: BorderRadius.circular(12),
-          child: InkWell(
-            borderRadius: BorderRadius.circular(12),
-            onTap: () => setState(() {
-              _destination = index;
-              if (index == 0) _selectedTransferId = null;
-            }),
-            child: Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 14),
-              child: Row(mainAxisSize: MainAxisSize.min, children: [
-                Icon(icon,
-                    size: 20,
-                    color: selected ? _colors.primary : _colors.muted),
-                const SizedBox(width: 10),
-                Text(label,
-                    style: TextStyle(
-                        fontWeight:
-                            selected ? FontWeight.w700 : FontWeight.w500,
-                        color: selected ? _colors.primary : _colors.muted)),
-              ]),
-            ),
-          ),
-        ));
+    void activate() {
+      _navigationRevision++;
+      setState(() {
+        _destination = index;
+        if (index == 0) _selectedTransferId = null;
+      });
+    }
+
+    return Semantics(
+        key: ValueKey('navigation-item-$index'),
+        label: label,
+        button: true,
+        selected: selected,
+        onTap: activate,
+        excludeSemantics: true,
+        child: AnimatedContainer(
+            duration: motionDuration(context),
+            decoration: BoxDecoration(
+                color: selected ? _colors.primaryTint : Colors.transparent,
+                borderRadius: BorderRadius.circular(12)),
+            child: Material(
+              color: selected ? _colors.primaryTint : Colors.transparent,
+              borderRadius: BorderRadius.circular(12),
+              child: InkWell(
+                borderRadius: BorderRadius.circular(12),
+                onTap: activate,
+                child: Padding(
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 14, vertical: 14),
+                  child: Row(mainAxisSize: MainAxisSize.min, children: [
+                    Icon(icon,
+                        size: 20,
+                        color: selected ? _colors.primary : _colors.muted),
+                    const SizedBox(width: 10),
+                    Text(label,
+                        style: TextStyle(
+                            fontWeight:
+                                selected ? FontWeight.w700 : FontWeight.w500,
+                            color: selected ? _colors.primary : _colors.muted)),
+                  ]),
+                ),
+              ),
+            )));
   }
 
   Widget _sidebar() => Container(
@@ -517,12 +610,7 @@ class _HomeScreenState extends State<HomeScreen> {
 
   Widget _workspace(List<String> available, String? address, bool desktop) {
     if (_loading) {
-      return const Center(
-          child: Column(mainAxisSize: MainAxisSize.min, children: [
-        CircularProgressIndicator(),
-        SizedBox(height: 16),
-        Text('正在准备传输工作台…'),
-      ]));
+      return const Center(child: WorkspaceProgress(label: '正在准备传输工作台…'));
     }
     if (_startupError != null) {
       return Center(
@@ -597,7 +685,7 @@ class _HomeScreenState extends State<HomeScreen> {
             if (_working)
               const Padding(
                   padding: EdgeInsets.only(bottom: 16),
-                  child: LinearProgressIndicator(semanticsLabel: '正在处理操作')),
+                  child: WorkspaceProgress(linear: true, label: '正在处理操作')),
             AnimatedSwitcher(
               duration: motionDuration(context, 180),
               child: KeyedSubtree(
@@ -615,14 +703,22 @@ class _HomeScreenState extends State<HomeScreen> {
                                     child: TextButton.icon(
                                         key:
                                             const ValueKey('back-to-transfers'),
-                                        onPressed: () => setState(
-                                            () => _selectedTransferId = null),
+                                        onPressed: () {
+                                          _navigationRevision++;
+                                          setState(
+                                              () => _selectedTransferId = null);
+                                        },
                                         icon: const Icon(Icons.arrow_back,
                                             size: 18),
                                         label: const Text('所有传输')))),
                             const SizedBox(height: 12),
                           ],
                           _networkCard(available, address),
+                          if (_controller
+                              .managedFileCleanupWarnings.isNotEmpty) ...[
+                            const SizedBox(height: 12),
+                            _managedFileCleanupWarningCard(),
+                          ],
                           const SizedBox(height: 22),
                           if (active == null) ...[
                             Text(
@@ -638,6 +734,7 @@ class _HomeScreenState extends State<HomeScreen> {
                             ],
                           ] else ...[
                             _pageCard(active, address),
+                            _transferActivity(active),
                             const SizedBox(height: 20),
                             _receivedCard(active),
                           ],
@@ -660,7 +757,10 @@ class _HomeScreenState extends State<HomeScreen> {
                 child: InkWell(
               key: ValueKey('open-transfer-${page.id}'),
               borderRadius: BorderRadius.circular(16),
-              onTap: () => setState(() => _selectedTransferId = page.id),
+              onTap: () {
+                _navigationRevision++;
+                setState(() => _selectedTransferId = page.id);
+              },
               child: Padding(
                   padding: const EdgeInsets.symmetric(vertical: 8),
                   child: Row(children: [
@@ -699,31 +799,318 @@ class _HomeScreenState extends State<HomeScreen> {
                   ])),
             )),
             const SizedBox(width: 4),
-            ActionMotion(
-                child: IconButton(
+            IconButton(
               key: ValueKey('delete-transfer-${page.id}'),
               tooltip: '删除传输',
               onPressed: _working ? null : () => _deletePage(page),
               icon: const Icon(Icons.delete_outline),
-            )),
+            ),
           ]),
         ),
       ));
 
-  Widget _status(String label, {required bool active}) => Container(
+  Widget _transferActivity(SharePage page) => ValueListenableBuilder<int>(
+        valueListenable: _controller.transferProgressRevision,
+        builder: (context, _, __) {
+          final pageTasks = _controller.transfers
+              .where((task) => task.pageId == page.id)
+              .toList(growable: false);
+          final activeTasks =
+              pageTasks.where((task) => task.status == 'active').toList();
+          final pausedTasks =
+              pageTasks.where((task) => task.status == 'paused').toList();
+          final recentTasks = pageTasks
+              .where(
+                  (task) => task.status != 'active' && task.status != 'paused')
+              .take(3)
+              .toList();
+          final visiblePaused = pausedTasks.take(3).toList();
+          final tasks = [...activeTasks, ...visiblePaused, ...recentTasks];
+          final activeCount = activeTasks.length;
+          final pausedCount = pausedTasks.length;
+          return AnimatedSize(
+            alignment: Alignment.topCenter,
+            duration: motionDuration(context, 180),
+            curve: Curves.easeOutCubic,
+            child: tasks.isEmpty
+                ? const SizedBox.shrink()
+                : Padding(
+                    padding: const EdgeInsets.only(top: 20),
+                    child: Card(
+                      child: Padding(
+                        padding: const EdgeInsets.all(20),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.stretch,
+                          children: [
+                            Row(children: [
+                              const Expanded(
+                                child: Text('传输动态',
+                                    style: TextStyle(
+                                        fontSize: 16,
+                                        fontWeight: FontWeight.w700)),
+                              ),
+                              if (activeCount > 0)
+                                _status('$activeCount 项进行中', active: true)
+                              else if (pausedCount > 0)
+                                _status('$pausedCount 项待续传', active: false)
+                              else
+                                Text('本次记录',
+                                    style: TextStyle(
+                                        color: _colors.muted, fontSize: 12)),
+                            ]),
+                            const SizedBox(height: 8),
+                            for (var index = 0; index < tasks.length; index++)
+                              Padding(
+                                key: ValueKey(tasks[index].id),
+                                padding:
+                                    EdgeInsets.only(top: index == 0 ? 0 : 12),
+                                child: Column(children: [
+                                  if (index > 0) ...[
+                                    const Divider(height: 1),
+                                    const SizedBox(height: 12),
+                                  ],
+                                  AnimatedSwitcher(
+                                    key:
+                                        ValueKey('task-row-${tasks[index].id}'),
+                                    duration: motionDuration(context, 160),
+                                    switchInCurve: Curves.easeOutCubic,
+                                    switchOutCurve: Curves.easeInCubic,
+                                    layoutBuilder:
+                                        (currentChild, previousChildren) =>
+                                            Stack(
+                                      alignment: AlignmentDirectional.topStart,
+                                      children: [
+                                        for (final child in previousChildren)
+                                          IgnorePointer(
+                                            child:
+                                                ExcludeSemantics(child: child),
+                                          ),
+                                        if (currentChild != null) currentChild,
+                                      ],
+                                    ),
+                                    transitionBuilder: (child, animation) =>
+                                        FadeTransition(
+                                      opacity: animation,
+                                      child: SizeTransition(
+                                        sizeFactor: animation,
+                                        axisAlignment: -1,
+                                        child: child,
+                                      ),
+                                    ),
+                                    child: KeyedSubtree(
+                                      key: ValueKey(
+                                          '${tasks[index].id}:${tasks[index].status}'),
+                                      child: _transferTaskRow(tasks[index]),
+                                    ),
+                                  ),
+                                ]),
+                              ),
+                            if (pausedCount > visiblePaused.length) ...[
+                              const SizedBox(height: 10),
+                              Text(
+                                '另有 ${pausedCount - visiblePaused.length} 项等待手机续传',
+                                style: TextStyle(
+                                    color: _colors.muted, fontSize: 12),
+                              ),
+                            ],
+                          ],
+                        ),
+                      ),
+                    ),
+                  ),
+          );
+        },
+      );
+
+  Widget _transferTaskRow(TransferTask task) {
+    final active = task.status == 'active';
+    final paused = task.status == 'paused';
+    final failed = task.status == 'failed';
+    final cancelling = _cancellingTransferIds.contains(task.id);
+    final determinate = task.totalBytes > 0;
+    final rawPercent = determinate ? (task.progress * 100).round() : null;
+    final percent = rawPercent == null
+        ? null
+        : active
+            ? rawPercent.clamp(0, 99).toInt()
+            : rawPercent;
+    final progressValue = !determinate
+        ? null
+        : active
+            ? task.progress.clamp(0.0, .99).toDouble()
+            : task.progress;
+    final metadata = <String>[];
+    if (determinate) {
+      metadata.add(
+          '${_sizeLabel(task.transferredBytes)} / ${_sizeLabel(task.totalBytes)}');
+    }
+    if (active && !cancelling && task.bytesPerSecond > 0) {
+      metadata.add('${_sizeLabel(task.bytesPerSecond.round())}/秒');
+      final remaining = task.remainingSeconds?.ceil();
+      if (remaining != null && remaining > 0) {
+        metadata.add('剩余约 ${_durationLabel(remaining)}');
+      }
+    }
+    final status = cancelling
+        ? '正在取消…'
+        : switch (task.status) {
+            'active' => task.direction == 'upload' ? '正在接收' : '正在发送',
+            'paused' => '等待续传',
+            'completed' => '已完成',
+            'failed' => '失败',
+            'cancelled' => '已取消',
+            _ => task.status,
+          };
+    final direction = task.direction == 'upload' ? '手机 → 电脑' : '电脑 → 手机';
+    final statusColor = cancelling || task.status == 'completed'
+        ? _colors.primary
+        : task.status == 'failed'
+            ? Theme.of(context).colorScheme.error
+            : _colors.muted;
+
+    return Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+      Row(children: [
+        Icon(
+          task.direction == 'upload'
+              ? Icons.call_received_rounded
+              : Icons.call_made_rounded,
+          size: 19,
+          color: active ? _colors.primary : _colors.muted,
+        ),
+        const SizedBox(width: 10),
+        Expanded(
+          child:
+              Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            Text(task.name,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(fontWeight: FontWeight.w600)),
+            const SizedBox(height: 3),
+            Semantics(
+              container: true,
+              liveRegion: true,
+              child: Text('$direction · $status',
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(color: statusColor, fontSize: 12)),
+            ),
+          ]),
+        ),
+        if (percent != null && (active || paused)) ...[
+          const SizedBox(width: 8),
+          Text('$percent%',
+              style: TextStyle(
+                  color: active ? _colors.primary : _colors.muted,
+                  fontSize: 12,
+                  fontWeight: FontWeight.w600)),
+        ],
+        if (active && _controller.canCancelTransfer(task.id))
+          ActionMotion(
+            child: IconButton(
+              key: ValueKey('cancel-transfer-${task.id}'),
+              tooltip: cancelling ? '正在取消传输' : '取消传输',
+              onPressed: _working || cancelling
+                  ? null
+                  : () => _cancelTransferTask(task),
+              icon: Icon(
+                  cancelling
+                      ? Icons.hourglass_empty_rounded
+                      : Icons.close_rounded,
+                  size: 18),
+            ),
+          )
+        else if (paused && _controller.canAbandonTransfer(task.id))
+          ActionMotion(
+            child: IconButton(
+              key: ValueKey('abandon-transfer-${task.id}'),
+              tooltip: cancelling ? '正在清理续传数据' : '放弃续传',
+              onPressed: _working || cancelling
+                  ? null
+                  : () => _abandonTransferTask(task),
+              icon: Icon(
+                  cancelling
+                      ? Icons.hourglass_empty_rounded
+                      : Icons.delete_outline_rounded,
+                  size: 18),
+            ),
+          ),
+      ]),
+      if (active || paused) ...[
+        const SizedBox(height: 10),
+        if (determinate)
+          LinearProgressIndicator(
+            value: progressValue,
+            semanticsLabel: '${task.name}，传输进度，$percent%',
+          )
+        else if (active)
+          const WorkspaceProgress(linear: true, label: '正在准备传输'),
+        if (metadata.isNotEmpty) ...[
+          const SizedBox(height: 6),
+          Wrap(
+            spacing: 12,
+            runSpacing: 4,
+            children: [
+              for (final value in metadata)
+                Text(value,
+                    style: TextStyle(color: _colors.muted, fontSize: 11)),
+            ],
+          ),
+        ],
+      ],
+      if (failed) ...[
+        const SizedBox(height: 6),
+        Text(
+          task.direction == 'upload'
+              ? '接收未完成。检查电脑的接收目录和磁盘空间，再在手机端继续或重新发起。'
+              : '发送未完成。确认共享文件仍可访问，再在手机端重新发起下载。',
+          style: TextStyle(
+              color: Theme.of(context).colorScheme.error,
+              fontSize: 12,
+              height: 1.35),
+        ),
+      ],
+    ]);
+  }
+
+  String _durationLabel(int seconds) {
+    if (seconds < 60) return '$seconds 秒';
+    final minutes = seconds ~/ 60;
+    if (minutes < 60) return '$minutes 分';
+    final hours = minutes ~/ 60;
+    final remainingMinutes = minutes % 60;
+    return remainingMinutes == 0
+        ? '$hours 小时'
+        : '$hours 小时 $remainingMinutes 分';
+  }
+
+  Widget _status(String label, {required bool active}) => AnimatedContainer(
+        duration: motionDuration(context, 160),
+        curve: Curves.easeOutCubic,
         padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
         decoration: BoxDecoration(
             color: active ? _colors.primaryTint : _colors.background,
             borderRadius: BorderRadius.circular(8)),
         child: Row(mainAxisSize: MainAxisSize.min, children: [
-          Icon(Icons.circle,
-              size: 6, color: active ? _colors.primary : _colors.muted),
+          AnimatedContainer(
+            duration: motionDuration(context, 160),
+            curve: Curves.easeOutCubic,
+            width: 6,
+            height: 6,
+            decoration: BoxDecoration(
+                color: active ? _colors.primary : _colors.muted,
+                shape: BoxShape.circle),
+          ),
           const SizedBox(width: 7),
-          Text(label,
-              style: TextStyle(
-                  color: active ? _colors.primary : _colors.muted,
-                  fontSize: 12,
-                  fontWeight: FontWeight.w600)),
+          Flexible(
+              child: AnimatedDefaultTextStyle(
+            duration: motionDuration(context, 160),
+            curve: Curves.easeOutCubic,
+            style: TextStyle(
+                color: active ? _colors.primary : _colors.muted,
+                fontSize: 12,
+                fontWeight: FontWeight.w600),
+            child: Text(label, maxLines: 2, overflow: TextOverflow.ellipsis),
+          )),
         ]),
       );
 
@@ -785,6 +1172,7 @@ class _HomeScreenState extends State<HomeScreen> {
               const SizedBox(width: 4),
               ActionMotion(
                   child: IconButton(
+                      focusNode: _refreshAddressFocus,
                       tooltip: '刷新局域网地址',
                       onPressed: _working ? null : _refreshAddresses,
                       icon: const Icon(Icons.refresh, size: 20))),
@@ -919,7 +1307,10 @@ class _HomeScreenState extends State<HomeScreen> {
                                                 fontWeight: FontWeight.w600)),
                                         const SizedBox(height: 5),
                                         Text(
-                                            '${page.receiveDirectory ?? '默认下载目录'}${page.organizeByDate ? ' · 按日期整理' : ''}',
+                                            _controller
+                                                    .hasConflictingPageId(page)
+                                                ? '传输 ID 冲突，接收目录已隔离'
+                                                : '${page.receiveDirectory ?? '默认下载目录'}${page.organizeByDate ? ' · 按日期整理' : ''}',
                                             style: TextStyle(
                                                 fontSize: 12,
                                                 color: _colors.muted),
@@ -932,12 +1323,30 @@ class _HomeScreenState extends State<HomeScreen> {
                                           onPressed: _working
                                               ? null
                                               : () => _receiveSettings(page),
-                                          child: const Text('设置')))
+                                          child: Text(_controller
+                                                  .hasConflictingPageId(page)
+                                              ? '已隔离'
+                                              : '设置')))
                                 ])),
                     ]))),
       ]);
 
   Widget _receivedCard(SharePage page) {
+    if (_controller.hasConflictingPageId(page)) {
+      return Card(
+        child: Padding(
+          padding: const EdgeInsets.all(22),
+          child:
+              Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            const Text('接收历史和目录已隔离',
+                style: TextStyle(fontSize: 18, fontWeight: FontWeight.w700)),
+            const SizedBox(height: 10),
+            Text('传输 ID 冲突，无法确认历史记录和接收目录属于哪份传输。为避免误操作，已隐藏记录和目录操作；删除冲突记录后可重新创建。',
+                style: TextStyle(color: _colors.muted, height: 1.6)),
+          ]),
+        ),
+      );
+    }
     final records = _controller.receivedFilesFor(page);
     final root = page.receiveDirectory ?? _controller.receiveDirectory;
     return Card(
@@ -959,45 +1368,43 @@ class _HomeScreenState extends State<HomeScreen> {
           const SizedBox(height: 8),
           Text('手机在分享网页中上传后，文件将自动保存到此设备，无需再次下载。',
               style: TextStyle(color: _colors.muted, height: 1.6)),
-          if (root != null) ...[
-            const SizedBox(height: 18),
-            Container(
-              padding: const EdgeInsets.fromLTRB(12, 8, 4, 8),
-              decoration: BoxDecoration(
-                  color: _colors.background,
-                  borderRadius: BorderRadius.circular(12),
-                  border: Border.all(color: _colors.border)),
-              child: Row(children: [
-                Expanded(
-                    child: SelectableText('接收根目录：$root',
-                        style: TextStyle(
-                            fontSize: 12,
-                            color: _colors.muted,
-                            fontFamily: 'monospace',
-                            height: 1.6))),
-                ActionMotion(
-                    child: IconButton(
-                        tooltip: '复制接收目录',
-                        icon: const Icon(Icons.copy_outlined, size: 18),
-                        onPressed: () => _perform(() async => _copy(
-                            await _controller.receiveDirectoryFor(page),
-                            '本传输接收目录已复制')))),
-              ]),
-            ),
-            const SizedBox(height: 12),
-            Wrap(children: [
+          const SizedBox(height: 18),
+          Container(
+            padding: const EdgeInsets.fromLTRB(12, 8, 4, 8),
+            decoration: BoxDecoration(
+                color: _colors.background,
+                borderRadius: BorderRadius.circular(12),
+                border: Border.all(color: _colors.border)),
+            child: Row(children: [
+              Expanded(
+                  child: SelectableText('接收根目录：${root ?? '默认下载目录（首次使用时准备）'}',
+                      style: TextStyle(
+                          fontSize: 12,
+                          color: _colors.muted,
+                          fontFamily: 'monospace',
+                          height: 1.6))),
               ActionMotion(
-                  child: OutlinedButton.icon(
-                key: const ValueKey('open-receive-directory'),
-                onPressed: _working
-                    ? null
-                    : () => _perform(() async => _fileManager.openDirectory(
-                        await _controller.receiveDirectoryFor(page))),
-                icon: const Icon(Icons.folder_open_outlined, size: 18),
-                label: const Text('打开接收文件夹'),
-              )),
+                  child: IconButton(
+                      tooltip: '复制接收目录',
+                      icon: const Icon(Icons.copy_outlined, size: 18),
+                      onPressed: () => _perform(() async => _copy(
+                          await _controller.receiveDirectoryFor(page),
+                          '本传输接收目录已复制')))),
             ]),
-          ],
+          ),
+          const SizedBox(height: 12),
+          Wrap(children: [
+            ActionMotion(
+                child: OutlinedButton.icon(
+              key: const ValueKey('open-receive-directory'),
+              onPressed: _working
+                  ? null
+                  : () => _perform(() async => _fileManager.openDirectory(
+                      await _controller.receiveDirectoryFor(page))),
+              icon: const Icon(Icons.folder_open_outlined, size: 18),
+              label: const Text('打开接收文件夹'),
+            )),
+          ]),
           const SizedBox(height: 20),
           const Divider(),
           if (records.isEmpty)
@@ -1103,11 +1510,37 @@ class _HomeScreenState extends State<HomeScreen> {
         ),
       );
 
+  Widget _managedFileCleanupWarningCard() {
+    final details =
+        _controller.managedFileCleanupWarnings.values.take(2).join('；');
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: _colors.surface,
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: _colors.border),
+      ),
+      child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        const Icon(Icons.warning_amber_rounded, color: Colors.orange, size: 20),
+        const SizedBox(width: 10),
+        Expanded(
+          child: Text(
+            '部分应用内共享文件尚未安全清理；清理记录已保留，之后会重试。$details',
+            style: TextStyle(color: _colors.muted, height: 1.5, fontSize: 12),
+          ),
+        ),
+      ]),
+    );
+  }
+
   Widget _pageCard(SharePage page, String? address) {
+    final pageIdConflicted = _controller.hasConflictingPageId(page);
     final port = _controller.portFor(page);
     final link =
         port != null && address != null ? 'http://$address:$port/' : null;
-    final error = _controller.pageErrors[page.id];
+    final error = _controller.pageErrors[page.id] ??
+        _controller.pageRecoveryWarnings[page.id];
     final total = page.files.fold<int>(0, (sum, file) => sum + file.size);
     return Card(
       child: Padding(
@@ -1139,7 +1572,7 @@ class _HomeScreenState extends State<HomeScreen> {
                 ])),
             ActionMotion(
                 child: IconButton(
-                    tooltip: '删除传输',
+                    tooltip: pageIdConflicted ? '删除冲突记录（共享副本会保留）' : '删除传输',
                     onPressed: _working ? null : () => _deletePage(page),
                     icon: const Icon(Icons.delete_outline, size: 20))),
           ]),
@@ -1158,9 +1591,11 @@ class _HomeScreenState extends State<HomeScreen> {
             final files = _fileList(page);
             final share = _sharePanel(link, port);
             if (constraints.maxWidth < 620) {
+              // On narrow screens the primary action is scanning the QR code;
+              // keep it ahead of potentially long file and receipt histories.
               return Column(
                   crossAxisAlignment: CrossAxisAlignment.stretch,
-                  children: [files, const SizedBox(height: 22), share]);
+                  children: [share, const SizedBox(height: 22), files]);
             }
             return IntrinsicHeight(
                 child: Row(
@@ -1179,24 +1614,30 @@ class _HomeScreenState extends State<HomeScreen> {
           Wrap(spacing: 8, runSpacing: 8, children: [
             ActionMotion(
                 child: OutlinedButton.icon(
-                    onPressed: _working ? null : () => _addFiles(page),
+                    onPressed: _working || pageIdConflicted
+                        ? null
+                        : () => _addFiles(page),
                     icon: const Icon(Icons.add, size: 18),
                     label: const Text('添加文件'))),
             ActionMotion(
                 child: OutlinedButton.icon(
-                    onPressed: _working ? null : () => _addFolder(page),
+                    onPressed: _working || pageIdConflicted
+                        ? null
+                        : () => _addFolder(page),
                     icon:
                         const Icon(Icons.create_new_folder_outlined, size: 18),
                     label: const Text('添加文件夹'))),
             ActionMotion(
                 child: TextButton.icon(
-                    onPressed: _working ? null : () => _receiveSettings(page),
+                    onPressed: _working || pageIdConflicted
+                        ? null
+                        : () => _receiveSettings(page),
                     icon: const Icon(Icons.folder_special_outlined, size: 18),
                     label: const Text('接收设置'))),
             if (port == null)
               ActionMotion(
                   child: OutlinedButton.icon(
-                      onPressed: _working
+                      onPressed: _working || pageIdConflicted
                           ? null
                           : () => _perform(() => _controller.start(page)),
                       icon: const Icon(Icons.play_arrow_outlined, size: 18),
@@ -1231,7 +1672,10 @@ class _HomeScreenState extends State<HomeScreen> {
         if (page.files.isEmpty)
           Padding(
               padding: EdgeInsets.symmetric(vertical: 28),
-              child: Text('还没有分享文件。添加文件后，手机网页会自动显示；手机现在也可以上传。',
+              child: Text(
+                  _controller.hasConflictingPageId(page)
+                      ? '此传输记录的 ID 与其他记录重复。为避免分享错误文件，文件列表和服务已停用；请删除冲突记录后重新创建。'
+                      : '还没有分享文件。添加文件后，手机网页会自动显示；手机现在也可以上传。',
                   style: TextStyle(color: _colors.muted))),
         for (final file in page.files)
           Padding(

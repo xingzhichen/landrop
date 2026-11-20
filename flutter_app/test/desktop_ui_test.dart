@@ -15,13 +15,15 @@ import 'package:landrop/theme_controller.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 class _PreviewController extends LanDropController {
-  _PreviewController({this.empty = false});
+  _PreviewController({this.empty = false, this.seedReceiveDirectory = true});
   final bool empty;
+  final bool seedReceiveDirectory;
 
   @override
   Future<void> initialize() async {
     addresses = ['192.168.1.108'];
-    receiveDirectory = '/Users/you/Downloads/LanDrop';
+    receiveDirectory =
+        seedReceiveDirectory ? '/Users/you/Downloads/LanDrop' : null;
     if (!empty) {
       pages.add(SharePage(
         id: '00000000-0000-4000-8000-000000000001',
@@ -78,6 +80,32 @@ class _PreviewController extends LanDropController {
   int? portFor(SharePage page) => page.running ? 47123 : null;
 
   final deletedPageIds = <String>[];
+  final cancellableTransferIds = <String>{};
+  final abandonableTransferIds = <String>{};
+  final cancelAttempts = <String>[];
+  final cancelledTransferIds = <String>[];
+  Object? cancelFailure;
+  Completer<void>? cancelBarrier;
+
+  @override
+  bool canCancelTransfer(String id) => cancellableTransferIds.contains(id);
+
+  @override
+  bool canAbandonTransfer(String id) => abandonableTransferIds.contains(id);
+
+  @override
+  Future<void> cancelTransfer(String id) async {
+    cancelAttempts.add(id);
+    if (cancelBarrier != null) await cancelBarrier!.future;
+    if (cancelFailure != null) throw cancelFailure!;
+    cancelledTransferIds.add(id);
+    cancellableTransferIds.remove(id);
+    abandonableTransferIds.remove(id);
+    for (final task in transfers.where((task) => task.id == id)) {
+      task.status = 'cancelled';
+    }
+    notifyListeners();
+  }
 
   @override
   Future<void> removePage(SharePage page) async {
@@ -176,12 +204,333 @@ void main() {
       expect(find.text('周末旅行照片.zip'), findsOneWidget);
       expect(find.text('海边的日落.jpg'), findsOneWidget);
       expect(find.text('手机拍摄的照片.jpg'), findsOneWidget);
+      expect(find.text('传输动态'), findsOneWidget);
+      expect(find.text('手机拍摄的旅行短片.mp4'), findsOneWidget);
+      expect(find.text('手机 → 电脑 · 正在接收'), findsOneWidget);
+      expect(find.text('64%'), findsOneWidget);
+      final task = controller.transfers.first;
+      task.transferredBytes = 68157440;
+      controller.notifyTransferProgressForTesting();
+      await tester.pump();
+      expect(find.text('65%'), findsOneWidget);
+      expect(find.text('4.0 MB/秒'), findsOneWidget);
+      expect(find.text('剩余约 9 秒'), findsOneWidget);
+      expect(
+          tester
+              .widget<LinearProgressIndicator>(
+                  find.byType(LinearProgressIndicator).last)
+              .value,
+          closeTo(.65, .001));
+      task.transferredBytes = task.totalBytes;
+      controller.notifyTransferProgressForTesting(force: true);
+      await tester.pump();
+      expect(find.text('99%'), findsOneWidget);
+      expect(find.text('100%'), findsNothing);
+      expect(
+          tester
+              .widget<LinearProgressIndicator>(
+                  find.byType(LinearProgressIndicator).last)
+              .value,
+          closeTo(.99, .001));
+      expect(find.text('64%'), findsNothing);
+      if (width < 620) {
+        expect(tester.getTopLeft(find.text('扫码传输')).dy,
+            lessThan(tester.getTopLeft(find.text('分享给手机 (3)')).dy));
+      }
       expect(tester.takeException(), isNull);
       await tester.runAsync(
           () => _captureImage(key, 'desktop-detail-${width.toInt()}'));
       await tester.pumpWidget(const SizedBox.shrink());
     });
   }
+
+  for (final width in [1440.0, 390.0]) {
+    testWidgets('navigation exposes selection semantics at width $width',
+        (tester) async {
+      tester.view.physicalSize = Size(width, 960);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+      final semantics = tester.ensureSemantics();
+      final controller = _PreviewController();
+      addTearDown(controller.dispose);
+      await tester.pumpWidget(MaterialApp(
+        theme: AppTheme.light,
+        home: HomeScreen(controller: controller, pickFiles: () async => []),
+      ));
+      await tester.pumpAndSettle();
+
+      void expectNavigation(int selectedIndex) {
+        for (var index = 0; index < 2; index++) {
+          final node = tester
+              .getSemantics(find.byKey(ValueKey('navigation-item-$index')));
+          final data = node.getSemanticsData();
+          expect(data.label, contains(index == 0 ? '我的传输' : '应用设置'));
+          expect(data.hasFlag(SemanticsFlag.isButton), isTrue);
+          expect(data.hasAction(SemanticsAction.tap), isTrue);
+          expect(
+              data.hasFlag(SemanticsFlag.isSelected), index == selectedIndex);
+        }
+      }
+
+      expectNavigation(0);
+      await tester.tap(find.text('应用设置').first);
+      await tester.pumpAndSettle();
+      expectNavigation(1);
+      expect(tester.takeException(), isNull);
+      semantics.dispose();
+      await tester.pumpWidget(const SizedBox.shrink());
+    });
+  }
+
+  testWidgets('active transfer activity can be cancelled with confirmation',
+      (tester) async {
+    tester.view.physicalSize = const Size(1024, 1200);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    final controller = _PreviewController()
+      ..cancellableTransferIds.add('preview-transfer');
+    final cancelBarrier = Completer<void>();
+    controller.cancelBarrier = cancelBarrier;
+    addTearDown(() {
+      if (!cancelBarrier.isCompleted) cancelBarrier.complete();
+    });
+    addTearDown(controller.dispose);
+    await tester.pumpWidget(MaterialApp(
+      theme: AppTheme.light,
+      home: HomeScreen(controller: controller, pickFiles: () async => []),
+    ));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(
+        const ValueKey('open-transfer-00000000-0000-4000-8000-000000000001')));
+    await tester.pumpAndSettle();
+    final cancel =
+        find.byKey(const ValueKey('cancel-transfer-preview-transfer'));
+    await tester.ensureVisible(cancel);
+    await tester.tap(cancel);
+    await tester.pumpAndSettle();
+    expect(find.text('取消「手机拍摄的旅行短片.mp4」？'), findsOneWidget);
+    expect(find.textContaining('未完成内容'), findsOneWidget);
+    await tester.tap(find.widgetWithText(FilledButton, '取消传输'));
+    await tester.pump();
+    expect(find.text('手机 → 电脑 · 正在取消…'), findsOneWidget);
+    expect(tester.widget<IconButton>(cancel).onPressed, isNull);
+    cancelBarrier.complete();
+    await tester.pumpAndSettle();
+    expect(controller.cancelledTransferIds, ['preview-transfer']);
+    expect(find.textContaining('已取消'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
+  testWidgets('outgoing transfer row is inert during status transition',
+      (tester) async {
+    tester.view.physicalSize = const Size(1024, 1200);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    final semantics = tester.ensureSemantics();
+    final controller = _PreviewController()
+      ..cancellableTransferIds.add('preview-transfer');
+    addTearDown(controller.dispose);
+    await tester.pumpWidget(MaterialApp(
+      theme: AppTheme.light,
+      home: HomeScreen(controller: controller, pickFiles: () async => []),
+    ));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(
+        const ValueKey('open-transfer-00000000-0000-4000-8000-000000000001')));
+    await tester.pumpAndSettle();
+
+    final activeStatus = find.text('手机 → 电脑 · 正在接收');
+    expect(activeStatus, findsOneWidget);
+    final activeSemantics =
+        tester.getSemantics(activeStatus).getSemanticsData();
+    expect(activeSemantics.label, '手机 → 电脑 · 正在接收');
+    expect(activeSemantics.hasFlag(SemanticsFlag.isLiveRegion), isTrue);
+    final cancel =
+        find.byKey(const ValueKey('cancel-transfer-preview-transfer'));
+    expect(
+        tester
+            .getSemantics(cancel)
+            .getSemanticsData()
+            .hasAction(SemanticsAction.tap),
+        isTrue);
+    final task = controller.transfers.first;
+    task.status = 'completed';
+    controller.notifyTransferProgressForTesting(force: true);
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 80));
+
+    expect(cancel.hitTestable(), findsNothing);
+    expect(
+        tester
+            .getSemantics(cancel)
+            .getSemanticsData()
+            .hasAction(SemanticsAction.tap),
+        isFalse);
+    await tester.tap(cancel, warnIfMissed: false);
+    await tester.pumpAndSettle();
+    expect(find.text('取消「手机拍摄的旅行短片.mp4」？'), findsNothing);
+    expect(controller.cancelAttempts, isEmpty);
+    expect(task.status, 'completed');
+    final completedStatus = find.text('手机 → 电脑 · 已完成');
+    expect(completedStatus, findsOneWidget);
+    final completedSemantics =
+        tester.getSemantics(completedStatus).getSemanticsData();
+    expect(completedSemantics.label, '手机 → 电脑 · 已完成');
+    expect(completedSemantics.hasFlag(SemanticsFlag.isLiveRegion), isTrue);
+    expect(tester.takeException(), isNull);
+    semantics.dispose();
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
+  testWidgets('paused upload can retry abandon after cleanup failure',
+      (tester) async {
+    tester.view.physicalSize = const Size(1024, 1200);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    final controller = _PreviewController();
+    addTearDown(controller.dispose);
+    await tester.pumpWidget(MaterialApp(
+      theme: AppTheme.light,
+      home: HomeScreen(controller: controller, pickFiles: () async => []),
+    ));
+    await tester.pumpAndSettle();
+    final task = controller.transfers.first;
+    task.status = 'paused';
+    controller.abandonableTransferIds.add(task.id);
+    controller.notifyListeners();
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(
+        const ValueKey('open-transfer-00000000-0000-4000-8000-000000000001')));
+    await tester.pumpAndSettle();
+    expect(find.text('手机 → 电脑 · 等待续传'), findsOneWidget);
+    final abandon =
+        find.byKey(const ValueKey('abandon-transfer-preview-transfer'));
+    await tester.ensureVisible(abandon);
+    await tester.tap(abandon);
+    await tester.pumpAndSettle();
+    expect(find.text('放弃「手机拍摄的旅行短片.mp4」的续传？'), findsOneWidget);
+    expect(find.textContaining('修复接收目录后可重试'), findsOneWidget);
+
+    controller.cancelFailure = StateError('fixture cleanup blocked');
+    await tester.tap(find.widgetWithText(FilledButton, '放弃续传'));
+    await tester.pumpAndSettle();
+    expect(task.status, 'paused');
+    expect(find.byTooltip('放弃续传'), findsOneWidget);
+    expect(find.textContaining('操作失败'), findsOneWidget);
+
+    controller.cancelFailure = null;
+    await tester
+        .tap(find.byKey(const ValueKey('abandon-transfer-preview-transfer')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.widgetWithText(FilledButton, '放弃续传'));
+    await tester.pumpAndSettle();
+    expect(controller.cancelAttempts, ['preview-transfer', 'preview-transfer']);
+    expect(controller.cancelledTransferIds, ['preview-transfer']);
+    expect(task.status, 'cancelled');
+    expect(find.textContaining('已取消'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
+  testWidgets('failed transfers show direction-specific recovery guidance',
+      (tester) async {
+    tester.view.physicalSize = const Size(1440, 1000);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    final controller = _PreviewController();
+    addTearDown(controller.dispose);
+    await tester.pumpWidget(MaterialApp(
+      theme: AppTheme.light,
+      home: HomeScreen(controller: controller, pickFiles: () async => []),
+    ));
+    await tester.pumpAndSettle();
+    controller.transfers.first.status = 'failed';
+    controller.transfers.add(TransferTask(
+        id: 'failed-download',
+        pageId: controller.pages.first.id,
+        pageTitle: controller.pages.first.title,
+        name: '分享中的文件.pdf',
+        direction: 'download',
+        totalBytes: 42,
+        status: 'failed'));
+    controller.notifyListeners();
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(
+        const ValueKey('open-transfer-00000000-0000-4000-8000-000000000001')));
+    await tester.pumpAndSettle();
+    expect(find.text('接收未完成。检查电脑的接收目录和磁盘空间，再在手机端继续或重新发起。'), findsOneWidget);
+    expect(find.text('发送未完成。确认共享文件仍可访问，再在手机端重新发起下载。'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
+  testWidgets('unavailable restored upload state is visible on its transfer',
+      (tester) async {
+    tester.view.physicalSize = const Size(1440, 960);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    final controller = _PreviewController();
+    addTearDown(controller.dispose);
+    const warning =
+        '部分上传临时数据暂不可访问或写入失败，续传记录已保留。检查接收目录和磁盘空间后重启应用；若移除该传输，无法访问的临时文件可能仍需手动清理。';
+    controller.pageRecoveryWarnings['00000000-0000-4000-8000-000000000001'] =
+        warning;
+    await tester.pumpWidget(MaterialApp(
+        theme: AppTheme.light,
+        home: HomeScreen(controller: controller, pickFiles: () async => [])));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(
+        const ValueKey('open-transfer-00000000-0000-4000-8000-000000000001')));
+    await tester.pumpAndSettle();
+    expect(find.text(warning), findsOneWidget);
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
+  testWidgets('large text remains usable in a narrow workspace',
+      (tester) async {
+    tester.view.physicalSize = const Size(390, 960);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    final controller = _PreviewController();
+    addTearDown(controller.dispose);
+    await tester.pumpWidget(MaterialApp(
+      theme: AppTheme.light,
+      builder: (context, child) => MediaQuery(
+        data: MediaQuery.of(context)
+            .copyWith(textScaler: const TextScaler.linear(2)),
+        child: child!,
+      ),
+      home: HomeScreen(controller: controller),
+    ));
+    await tester.pumpAndSettle();
+    controller.transfers.first.status = 'failed';
+    controller.notifyListeners();
+    await tester.pumpAndSettle();
+    expect(tester.takeException(), isNull);
+    final open = find.byKey(
+        const ValueKey('open-transfer-00000000-0000-4000-8000-000000000001'));
+    await tester.dragUntilVisible(
+        open, find.byType(Scrollable).first, const Offset(0, -320));
+    await tester.pumpAndSettle();
+    await tester.tap(open);
+    await tester.pumpAndSettle();
+    expect(find.textContaining('接收未完成'), findsOneWidget);
+    expect(find.text('来自手机的文件'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+    await tester.tap(find.text('应用设置').first);
+    await tester.pumpAndSettle();
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
 
   testWidgets('dark transfer detail and settings have themed surfaces',
       (tester) async {
@@ -332,6 +681,53 @@ void main() {
     expect(tester.takeException(), isNull);
     await tester.pumpWidget(const SizedBox.shrink());
   });
+  testWidgets('received folder controls work before default path initializes',
+      (tester) async {
+    tester.view.physicalSize = const Size(1200, 1200);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    final controller = _PreviewController(seedReceiveDirectory: false);
+    final manager = _TestFileManager();
+    addTearDown(controller.dispose);
+    await tester.pumpWidget(MaterialApp(
+        theme: AppTheme.light,
+        home: HomeScreen(controller: controller, fileManager: manager)));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(
+        const ValueKey('open-transfer-00000000-0000-4000-8000-000000000001')));
+    await tester.pumpAndSettle();
+    expect(find.textContaining('首次使用时准备'), findsOneWidget);
+    final folder = find.byKey(const ValueKey('open-receive-directory'));
+    final copy = find.byTooltip('复制接收目录');
+    expect(folder, findsOneWidget);
+    expect(copy, findsOneWidget);
+    String? copied;
+    tester.binding.defaultBinaryMessenger
+        .setMockMethodCallHandler(SystemChannels.platform, (call) async {
+      if (call.method == 'Clipboard.setData') {
+        copied = (call.arguments as Map)['text'] as String;
+      }
+      return null;
+    });
+    await tester.ensureVisible(copy);
+    await tester.pumpAndSettle();
+    await tester.tap(copy);
+    await tester.pumpAndSettle();
+    expect(
+        copied, await controller.receiveDirectoryFor(controller.pages.single));
+    await tester.ensureVisible(folder);
+    await tester.pumpAndSettle();
+    await tester.tap(folder);
+    await tester.pumpAndSettle();
+    expect(manager.opened,
+        [await controller.receiveDirectoryFor(controller.pages.single)]);
+    expect(tester.takeException(), isNull);
+    tester.binding.defaultBinaryMessenger
+        .setMockMethodCallHandler(SystemChannels.platform, null);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
   for (final width in [1440.0, 390.0]) {
     testWidgets('received folder actions route actual paths at width $width',
         (tester) async {

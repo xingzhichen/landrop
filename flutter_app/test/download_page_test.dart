@@ -25,26 +25,77 @@ void main() {
     expect(html, contains('请连接同一 Wi-Fi'));
     expect(html, contains('data-enter'));
     expect(html, contains('href="#top"'));
-    expect(html, contains('file-card'));
+    expect(html, contains('id="file-list" role="list" aria-label="可下载文件"'));
+    expect(
+        html,
+        contains(
+            'id="file-list-announcement" class="sr-only" role="status" aria-live="polite" aria-atomic="true"'));
+    expect(html,
+        contains('id="zip-cancel" type="button" aria-label="取消本页 ZIP 下载任务"'));
+    expect(html, contains('已完成或被拒绝的任务会被忽略。'));
+    expect(html, contains('class="file-card kind-'));
+    expect(
+        html,
+        contains(
+            'role="listitem" data-file-id="15bd1547-cae0-4b5e-9662-2f24b2ef6e89"'));
     expect(html, contains('@keyframes rise'));
+    expect(html, contains('[data-enter]{animation:rise 260ms'));
+    expect(html, contains('@media(hover:hover) and (pointer:fine)'));
+    expect(RegExp(r'\.action:hover\{').allMatches(html), hasLength(1));
     expect(html, contains('id="theme-toggle"'));
-    expect(html, contains('download="照片.jpg"'));
+    expect(html, contains('href="/file/15bd1547-cae0-4b5e-9662-2f24b2ef6e89"'));
+    expect(html, isNot(contains('download="照片.jpg"')));
   });
 
   test('renders accessible multi-file upload controls and automatic save help',
       () {
     final html = renderDownloadPage('双向传输', []);
     expect(html, contains('暂无可下载的文件'));
+    expect(html, contains('id="file-empty" role="listitem"'));
     expect(html, contains('上传至电脑'));
     expect(html, contains('type="file" multiple'));
     expect(html, contains('id="upload-button" type="button" disabled'));
+    expect(
+        html, contains('id="upload-panel" aria-labelledby="upload-heading"'));
+    expect(
+        html,
+        isNot(contains(
+            'id="upload-panel" aria-labelledby="upload-heading" aria-busy=')));
     expect(html, contains('aria-describedby="upload-help"'));
+    expect(
+        html,
+        contains(
+            'id="upload-recovery-warning" role="status" aria-live="polite" hidden'));
+    expect(html, contains('如果浏览器允许'));
     expect(html, contains('aria-label="上传文件及进度"'));
     expect(html, contains('单文件最大 1 GiB（1,073,741,824 字节）'));
     expect(html, contains('自动保存到电脑的接收目录'));
     expect(html, contains('无需在电脑上逐个确认'));
     expect(html, contains('按顺序逐个上传'));
     expect(html, contains('aria-live="polite"'));
+  });
+
+  test('media previews have per-file accessible names and live feedback', () {
+    final html = renderDownloadPage('媒体预览', [
+      const DownloadItem(
+        id: '15bd1547-cae0-4b5e-9662-2f24b2ef6e89',
+        name: '毕业照.jpg',
+        size: 100,
+      ),
+      const DownloadItem(
+        id: '25bd1547-cae0-4b5e-9662-2f24b2ef6e89',
+        name: '行程 <重要> "精选".mp4',
+        size: 200,
+      ),
+    ]);
+    expect(html, contains('aria-label="预览 毕业照.jpg"'));
+    expect(html, contains('aria-label="预览 行程 &lt;重要&gt; &quot;精选&quot;.mp4"'));
+    expect(
+        html,
+        contains(
+            'id="preview-status" class="preview-status" role="status" aria-live="polite" aria-atomic="true"'));
+    expect(html, contains('id="preview-media" aria-busy="false"'));
+    expect(html, contains('#preview-status:empty{margin:0;min-height:0}'));
   });
 
   test('permits only same-origin connections and keeps the rest of CSP strict',
@@ -122,7 +173,9 @@ void main() {
             size: 1,
             relativePath: '目录/<img>.$ext'),
     ]);
-    expect(html, contains('href="/download.zip"'));
+    expect(html, contains('id="zip-download" href="/download.zip"'));
+    expect(html,
+        isNot(contains('id="zip-download" href="/download.zip" download')));
     expect(html, contains('id="select-all"'));
     expect(html, contains('目录/&lt;img&gt;'));
     expect(RegExp('class="action preview-button"').allMatches(html).length, 16);

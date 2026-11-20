@@ -3,6 +3,8 @@ name: Build desktop apps
 on:
   push:
     branches: [master]
+  pull_request:
+    branches: [master]
   workflow_dispatch:
 
 permissions:
@@ -16,33 +18,39 @@ jobs:
       matrix:
         include:
           - platform: macOS
-            runner: macos-latest
+            runner: macos-15
             target: macos
           - platform: Windows
-            runner: windows-latest
+            runner: windows-2025
             target: windows
     runs-on: ${{ matrix.runner }}
     defaults:
       run:
         working-directory: flutter_app
     steps:
-      - uses: actions/checkout@v4
-      - uses: subosito/flutter-action@v2
+      # Pin actions to immutable commits; Dependabot tracks new releases.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
-          channel: stable
+          node-version: '24.10.0'
+      - uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2
+        with:
+          flutter-version: '3.50.0'
           cache: true
       - name: Install dependencies
-        run: flutter pub get
+        run: flutter pub get --enforce-lockfile
       - name: Analyze source
-        run: flutter analyze
+        run: flutter analyze --no-pub
       - name: Run tests on macOS
         if: matrix.target == 'macos'
-        run: flutter test
+        env:
+          TMPDIR: ${{ runner.temp }}
+        run: flutter test --no-pub
       - name: Run tests on Windows with failure details
         if: matrix.target == 'windows'
         shell: pwsh
         run: |
-          $lines = & flutter test --reporter=json 2>&1
+          $lines = & flutter test --no-pub --reporter=json 2>&1
           $testExit = $LASTEXITCODE
           $events = @()
           foreach ($line in $lines) {
@@ -71,26 +79,118 @@ jobs:
             }
           }
           exit $testExit
+      - name: Test macOS package output safety
+        if: matrix.target == 'macos'
+        env:
+          TMPDIR: ${{ runner.temp }}
+        run: bash tool/test_package_macos.sh
       - name: Build release
-        run: flutter build ${{ matrix.target }} --release
+        run: flutter build ${{ matrix.target }} --release --no-pub
       - name: Sign and package macOS application
         if: matrix.target == 'macos'
+        env:
+          TMPDIR: ${{ runner.temp }}
         run: bash tool/package_macos.sh
       - name: Package Windows application
         if: matrix.target == 'windows'
         shell: pwsh
         run: Compress-Archive -Path build/windows/x64/runner/Release/* -DestinationPath build/LanDrop-Windows.zip -Force
+      - name: Smoke-test documented Windows checksum instructions
+        if: matrix.target == 'windows'
+        shell: pwsh
+        run: |
+          $archiveDir = Join-Path $PWD.Path 'build'
+          $archivePath = Join-Path $archiveDir 'LanDrop-Windows.zip'
+          $manifestPath = Join-Path $archiveDir 'SHA256SUMS'
+          if (Test-Path -LiteralPath $manifestPath) {
+            throw "Unexpected existing checksum file: $manifestPath"
+          }
+          $hash = (Get-FileHash -LiteralPath $archivePath -Algorithm SHA256).Hash.ToLowerInvariant()
+          try {
+            Set-Content -LiteralPath $manifestPath -Value "$hash  LanDrop-Windows.zip" -Encoding ascii -NoNewline
+            Push-Location $archiveDir
+            try {
+              $checksumCheck = {
+                # Keep this snippet in sync with the README's Windows instructions.
+                $lines = @(Get-Content .\SHA256SUMS | Where-Object { $_ -match '  LanDrop-Windows\.zip$' })
+                if ($lines.Count -ne 1) { throw 'Expected exactly one checksum entry for LanDrop-Windows.zip' }
+                $expected = ($lines[0] -split '\s+')[0]
+                $actual = (Get-FileHash .\LanDrop-Windows.zip -Algorithm SHA256).Hash
+                if ($actual -ne $expected) { throw 'SHA-256 mismatch' } else { 'SHA-256 OK' }
+              }
+              & $checksumCheck
+              $wrongHash = '0' * 64
+              if ($wrongHash -eq $hash) { $wrongHash = '1' * 64 }
+              Set-Content -LiteralPath $manifestPath -Value "$wrongHash  LanDrop-Windows.zip" -Encoding ascii -NoNewline
+              $rejectedMismatch = $false
+              try {
+                & $checksumCheck
+              } catch {
+                if ($_.Exception.Message -ne 'SHA-256 mismatch') { throw }
+                $rejectedMismatch = $true
+              }
+              if (-not $rejectedMismatch) { throw 'Checksum verifier accepted an incorrect hash' }
+              Set-Content -LiteralPath $manifestPath -Value @("$hash  LanDrop-Windows.zip", "$wrongHash  LanDrop-Windows.zip") -Encoding ascii
+              $rejectedDuplicate = $false
+              try {
+                & $checksumCheck
+              } catch {
+                if ($_.Exception.Message -ne 'Expected exactly one checksum entry for LanDrop-Windows.zip') { throw }
+                $rejectedDuplicate = $true
+              }
+              if (-not $rejectedDuplicate) { throw 'Checksum verifier accepted duplicate entries' }
+              Set-Content -LiteralPath $manifestPath -Value '' -Encoding ascii -NoNewline
+              $rejectedMissing = $false
+              try {
+                & $checksumCheck
+              } catch {
+                if ($_.Exception.Message -ne 'Expected exactly one checksum entry for LanDrop-Windows.zip') { throw }
+                $rejectedMissing = $true
+              }
+              if (-not $rejectedMissing) { throw 'Checksum verifier accepted a missing entry' }
+            } finally {
+              Pop-Location
+            }
+          } finally {
+            if (Test-Path -LiteralPath $manifestPath) {
+              Remove-Item -LiteralPath $manifestPath -Force
+            }
+          }
       - name: Upload macOS app
         if: matrix.target == 'macos'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: LanDrop-macOS
           path: flutter_app/build/LanDrop-macOS.zip
           if-no-files-found: error
       - name: Upload Windows app
         if: matrix.target == 'windows'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: LanDrop-Windows
           path: flutter_app/build/LanDrop-Windows.zip
+          if-no-files-found: error
+
+  verify-packages:
+    name: Verify cross-platform release packages
+    needs: build
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: LanDrop-*
+          path: dist
+          merge-multiple: true
+      - name: Test release archive verifier
+        env:
+          TMPDIR: ${{ runner.temp }}
+        run: bash flutter_app/tool/test_release_archives.sh
+      - name: Verify downloaded release packages
+        run: bash flutter_app/tool/verify_release_archives.sh dist
+      - name: Upload verified package checksums
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: LanDrop-SHA256SUMS
+          path: dist/SHA256SUMS
           if-no-files-found: error

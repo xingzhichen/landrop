@@ -10,14 +10,15 @@ dependencies:
   flutter:
     sdk: flutter
   file_picker: ^13.4.0
-  cross_file: ^0.3.5+5
   qr_flutter: ^4.1.0
   shared_preferences: ^2.5.0
   path_provider: ^2.1.0
   archive: ^4.0.7
+  characters: ^1.4.1
   path: ^1.9.1
 
 dev_dependencies:
+  cross_file: ^0.3.5+5
   flutter_test:
     sdk: flutter
   flutter_lints: ^6.0.0

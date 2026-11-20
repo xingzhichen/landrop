@@ -22,10 +22,32 @@ void main() {
         File('../.github/workflows/build-desktop.yml').readAsStringSync();
     final script = File('tool/package_macos.sh').readAsStringSync();
     expect(workflow, contains('bash tool/package_macos.sh'));
+    expect(
+      workflow,
+      contains(r'''      - name: Sign and package macOS application
+        if: matrix.target == 'macos'
+        env:
+          TMPDIR: ${{ runner.temp }}
+        run: bash tool/package_macos.sh'''),
+    );
     expect(script, contains('--entitlements "\$ENTITLEMENTS"'));
     expect(script, contains('codesign -d --entitlements :-'));
     expect(
         script, contains('com.apple.security.files.user-selected.read-only'));
     expect(script, contains('codesign --verify --deep --strict'));
+    expect(
+      script,
+      contains('codesign --verify --deep --strict "\$PACKAGED_APP"'),
+    );
+    expect(
+      script,
+      contains('ditto -x -k "\$PACKAGE_OUTPUT" "\$VERIFY_DIR"'),
+    );
+    expect(
+      script,
+      contains('temporary directory root must be outside the app bundle'),
+    );
+    expect(script,
+        contains('ZIP extraction lost the user-selected file read permission'));
   });
 }

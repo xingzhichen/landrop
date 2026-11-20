@@ -8,6 +8,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: publish-release-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   build:
     name: Build ${{ matrix.platform }} release
@@ -16,29 +20,38 @@ jobs:
       matrix:
         include:
           - platform: macOS
-            runner: macos-latest
+            runner: macos-15
             target: macos
           - platform: Windows
-            runner: windows-latest
+            runner: windows-2025
             target: windows
     runs-on: ${{ matrix.runner }}
     defaults:
       run:
         working-directory: flutter_app
     steps:
-      - uses: actions/checkout@v4
-      - uses: subosito/flutter-action@v2
+      # Pin actions to immutable commits; Dependabot tracks new releases.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Verify tag matches app version
+        shell: bash
+        run: bash tool/verify_release_version.sh "$GITHUB_REF_NAME"
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
-          channel: stable
+          node-version: '24.10.0'
+      - uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2
+        with:
+          flutter-version: '3.50.0'
           cache: true
       - name: Install dependencies
-        run: flutter pub get
+        run: flutter pub get --enforce-lockfile
       - name: Analyze source
-        run: flutter analyze
+        run: flutter analyze --no-pub
       - name: Run tests
-        run: flutter test
+        env:
+          TMPDIR: ${{ runner.temp }}
+        run: flutter test --no-pub
       - name: Build release
-        run: flutter build ${{ matrix.target }} --release
+        run: flutter build ${{ matrix.target }} --release --no-pub
       - name: Sign and package macOS application
         if: matrix.target == 'macos'
         run: bash tool/package_macos.sh
@@ -47,7 +60,7 @@ jobs:
         shell: pwsh
         run: Compress-Archive -Path build/windows/x64/runner/Release/* -DestinationPath build/LanDrop-Windows.zip -Force
       - name: Upload release package
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: LanDrop-${{ matrix.platform }}
           path: flutter_app/build/LanDrop-${{ matrix.platform }}.zip
@@ -56,22 +69,32 @@ jobs:
   publish:
     name: Publish release and assets
     needs: build
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           pattern: LanDrop-*
           path: dist
           merge-multiple: true
-      - name: Create GitHub Release
+      - name: Test release archive verification
+        env:
+          TMPDIR: ${{ runner.temp }}
+        run: bash flutter_app/tool/test_release_archives.sh
+      - name: Verify release ZIPs and generate SHA-256 checksums
+        env:
+          VERIFIED_RELEASE_DIR: ${{ runner.temp }}/landrop-verified-release
+        run: bash flutter_app/tool/verify_release_archives.sh dist "$VERIFIED_RELEASE_DIR"
+      - name: Test retry-safe release publisher
+        run: bash flutter_app/tool/test_publish_release.sh
+      - name: Publish GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: |
-          version="${GITHUB_REF_NAME#v}"
-          gh release create "$GITHUB_REF_NAME" dist/*.zip \
-            --verify-tag \
-            --title "LanDrop $version" \
-            --notes-file RELEASE-1.3.md
+          VERIFIED_RELEASE_DIR: ${{ runner.temp }}/landrop-verified-release
+        run: >-
+          bash flutter_app/tool/publish_release.sh "$GITHUB_REF_NAME"
+          "$VERIFIED_RELEASE_DIR/LanDrop-macOS.zip"
+          "$VERIFIED_RELEASE_DIR/LanDrop-Windows.zip"
+          "$VERIFIED_RELEASE_DIR/SHA256SUMS"

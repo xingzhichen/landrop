@@ -2,16 +2,49 @@
 // Runs the actual HTML-emitted JS against the live Dart HttpServer, no browser.
 const assert = require('node:assert/strict');
 const http = require('node:http');
+const net = require('node:net');
 const {File} = require('node:buffer');
 const {Element, setup} = require('./download_page_behavior.cjs');
 const base = process.argv[2];
 const headers = {'Origin':base,'Sec-Fetch-Site':'same-origin'};
 const wire = [];
-let mode = '', networkFailed = false, injected409 = false, activePartial;
+let mode = '', networkFailed = false, injected409 = false, activePartial, loseCompleteResponse = false;
 async function liveFetch(path, init={}) {
   const response = await fetch(new URL(path,base),{...init,headers:{...headers,...init.headers}});
   wire.push({method:init.method||'GET',path,status:response.status});
+  if(loseCompleteResponse && (init.method||'GET')==='POST' && path.endsWith('/complete')) {
+    loseCompleteResponse=false; await response.arrayBuffer(); throw Error('simulated lost complete response after commit');
+  }
   return response;
+}
+function zipAfterWriteHalfClose() {
+  const target=new URL('/download.zip',base);
+  return new Promise((resolve,reject)=>{
+    const socket=net.connect(Number(target.port),target.hostname), chunks=[];
+    socket.once('connect',()=>socket.end(
+      `GET /download.zip HTTP/1.1\r\nHost: ${target.host}\r\nConnection: close\r\n\r\n`));
+    socket.on('data',chunk=>chunks.push(chunk));
+    socket.on('error',reject);
+    socket.on('close',()=>resolve(Buffer.concat(chunks)));
+  });
+}
+function parseFinalResponse(data) {
+  let offset=0;
+  while(offset<data.length) {
+    const end=data.indexOf('\r\n\r\n',offset);
+    assert.ok(end>=0,'complete HTTP headers');
+    const header=data.toString('latin1',offset,end);
+    const status=Number(header.split(/\s+/,3)[1]);
+    const bodyStart=end+4;
+    if(status>=100&&status<200&&status!==101) { offset=bodyStart; continue; }
+    const match=/\r?\ncontent-length:\s*(\d+)/i.exec(header);
+    assert.ok(match,'final response declares content length');
+    const length=Number(match[1]);
+    const body=data.subarray(bodyStart,bodyStart+length);
+    assert.equal(body.length,length,'complete response body');
+    return {status,header,body};
+  }
+  throw Error('no final HTTP response');
 }
 class XHR extends Element {
   constructor() { super(); this.upload = new Element(); this.headers = {...headers}; }
@@ -55,7 +88,7 @@ async function main() {
   const html=await response.text();
   assert.match(html,/img-src 'self'; media-src 'self'/); assert.match(html,/目录\/photo\.png/,'controller must forward DownloadItem.relativePath');
   const pageScript=html.match(/<script>([\s\S]*?)<\/script>/)[1];
-  const createApp=()=>setup({pageScript,fetch:liveFetch,XMLHttpRequest:XHR});
+  const createApp=(options={})=>setup({pageScript,fetch:liveFetch,XMLHttpRequest:XHR,...options});
   const bytes=Buffer.alloc(4194304+37,97);
   const file=new File([bytes],'live 空格&?#%.bin',{lastModified:123});
   const app=createApp(); mode='resume'; await app.choose([file]); await app.button.emit('click');
@@ -73,6 +106,18 @@ async function main() {
   assert.equal(repeatedComplete.status,201,'complete is idempotent after a lost success response');
   assert.deepEqual(await repeatedComplete.json(),{name:'live 空格&_#%.bin',size:bytes.length});
   assert.equal(wire.filter(r=>r.method==='PATCH'&&r.status===200).every(r=>r.bytes<=4194304),true);
+
+  // If completion commits but its response is lost, cancel must report saved, not cleaned.
+  const raceApp=createApp(), raceFile=new File([Buffer.from('saved before response loss')],'completion-race.bin',{lastModified:88});
+  loseCompleteResponse=true; await raceApp.choose([raceFile]); await raceApp.button.emit('click');
+  assert.equal(state(raceApp.rows[0]),'paused','lost completion response is initially uncertain');
+  const racePatch=wire.filter(r=>r.method==='PATCH').at(-1);
+  assert.ok(racePatch,raceApp.rows[0].children[1].textContent);
+  const raceId=racePatch.path.match(/\/uploads\/([^?]+)/)[1];
+  await raceApp.rows[0].children[3].children[0].emit('click');
+  assert.equal(state(raceApp.rows[0]),'success'); assert.match(raceApp.rows[0].children[1].textContent,/已确认文件保存/);
+  const raceReceipt=await liveFetch('/uploads/'+raceId); assert.equal(raceReceipt.status,200);
+  assert.deepEqual(await raceReceipt.json(),{id:raceId,offset:raceFile.size,size:raceFile.size});
 
   // A new DOM/File selection must recover by POST fingerprint, not a cached File handle.
   const app2=createApp(); mode='resume'; injected409=true; networkFailed=false;
@@ -92,7 +137,7 @@ async function main() {
   assert.equal((await liveFetch('/uploads/'+cancelState.id)).status,404);
 
   // Safe media stays inline; HTML and SVG always remain attachments, even with inline=1.
-  const files=[...html.matchAll(/href="(\/file\/[a-f0-9-]+)" download="([^"]+)"/g)];
+  const files=[...html.matchAll(/href="(\/file\/[a-f0-9-]+)" aria-label="下载 ([^"]+)"/g)];
   for(const [,path,name] of files) {
     const r=await liveFetch(path+'?inline=1'); assert.equal(r.status,200); await r.arrayBuffer();
     assert.equal(r.headers.get('x-content-type-options'),'nosniff');
@@ -103,6 +148,25 @@ async function main() {
   for(const path of ['/download.zip','/download.zip?ids='+ids.slice(0,2).join(',')]) {
     const r=await liveFetch(path); assert.equal(r.status,200); assert.match(r.headers.get('content-type'),/^application\/zip/); assert.ok((await r.arrayBuffer()).byteLength>22);
   }
+  const cancelRequests=[];
+  const zipPage=createApp({onBeacon:(path,body)=>cancelRequests.push(liveFetch(path,{method:'POST',body}))});
+  zipPage.elements['select-all'].checked=false; await zipPage.elements['select-all'].emit('change');
+  await zipPage.elements['zip-download'].emit('click');
+  const tokenizedZip=zipPage.navigations[0];
+  assert.match(tokenizedZip,/^\/download\.zip\?job=[0-9a-f-]{36}$/);
+  assert.equal(zipPage.elements['zip-download'].href,'/download.zip','one-use tokens never remain in the anchor URL');
+  const tokenizedRequest=liveFetch(tokenizedZip);
+  await zipPage.pagehide(); assert.equal(zipPage.beacons.length,0,'pagehide leaves browser-managed ZIP downloads alone');
+  const tokenizedResponse=await tokenizedRequest; assert.equal(tokenizedResponse.status,200); await tokenizedResponse.arrayBuffer();
+  const tokenReplay=await liveFetch(tokenizedZip);
+  assert.ok(tokenReplay.status===400||tokenReplay.status===409,'one-use tokens cannot restart ZIP generation');
+  await zipPage.elements['zip-cancel'].emit('click'); assert.equal(zipPage.beacons.length,1);
+  assert.equal(zipPage.beacons[0].url,tokenizedZip.replace('/download.zip','/download.zip/cancel'));
+  assert.equal(zipPage.beacons[0].body,undefined); assert.equal((await cancelRequests[0]).status,204);
+  const halfClosed=parseFinalResponse(await zipAfterWriteHalfClose());
+  assert.equal(halfClosed.status,200,'a request-side FIN must not cancel response delivery');
+  assert.match(halfClosed.header,/content-type: application\/zip/i);
+  assert.deepEqual(halfClosed.body.subarray(0,2),Buffer.from([0x50,0x4b]));
   // Incomplete completion must never commit a file, and the session stays cancellable.
   const incompleteCreate=await liveFetch('/uploads?name=incomplete.bin&size=3&fingerprint=incomplete-live',{method:'POST'});
   assert.equal(incompleteCreate.status,201); const incomplete=await incompleteCreate.json();

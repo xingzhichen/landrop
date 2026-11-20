@@ -6,9 +6,11 @@ import 'package:landrop/landrop_controller.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'controller_test.dart' show deleteTestDirectory;
+import 'secure_receive_file_test_helper.dart';
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
+  installSecureReceiveFileMock();
   test(
       'actual emitted web JS and live server share the session/media/ZIP contract',
       () async {
@@ -43,12 +45,16 @@ void main() {
       expect(exit, 0, reason: '$output\n$errors');
       expect(output, contains('live web/server contract passed'));
       expect(controller.receivedFiles.map((record) => record.name),
-          unorderedEquals(['live 空格&_#%.bin', 'live-reselect.bin']));
+          unorderedEquals(['live 空格&_#%.bin', 'live-reselect.bin', 'completion-race.bin']));
       for (final record in controller.receivedFiles) {
         final saved = await File(record.path).readAsBytes();
-        expect(saved.length, 4 * 1024 * 1024 + 37);
-        expect(saved.every((byte) => byte == 97), isTrue,
-            reason: 'chunk/resume must preserve exact file bytes');
+        if (record.name == 'completion-race.bin') {
+          expect(String.fromCharCodes(saved), 'saved before response loss');
+        } else {
+          expect(saved.length, 4 * 1024 * 1024 + 37);
+          expect(saved.every((byte) => byte == 97), isTrue,
+              reason: 'chunk/resume must preserve exact file bytes');
+        }
       }
       final receivePath = await controller.receiveDirectoryFor(page);
       expect(
@@ -111,6 +117,8 @@ void main() {
             await controller.addPaths(page, [svg.path, html.path]);
           case 'remove':
             await controller.removeFile(page, page.files.first);
+          case 'removeLast':
+            await controller.removeFile(page, page.files.last);
           case 'clear':
             for (final file in page.files.toList()) {
               await controller.removeFile(page, file);
