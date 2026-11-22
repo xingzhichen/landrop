@@ -875,8 +875,19 @@ dialog::backdrop{background:rgba(10,16,30,.65)}
     entries.forEach(function (e) { if (e.file.size <= maxUploadBytes) { total += e.file.size; sent += e.sent || 0; } });
     totalProgress.value = total ? Math.min(100, sent/total*100) : 0;
   }
-  function state(entry, value, message) {
+  function state(entry, value, message, announce) {
+    var changed = entry.state !== value;
     entry.state = value; entry.row.setAttribute('data-state', value); entry.status.textContent = message;
+    if (entry.announcement && (changed || announce)) {
+      entry.announcement.textContent = entry.file.name + '：' + message;
+      if (value === 'uploading') {
+        entry.lastAnnouncementAt = performance.now();
+        entry.lastAnnouncedPercent = entry.progress.value;
+      } else {
+        entry.lastAnnouncementAt = undefined;
+        entry.lastAnnouncedPercent = undefined;
+      }
+    }
     entry.cancel.hidden = ['success','cancelled','error'].includes(value);
   }
   function refreshButton() {
@@ -1009,14 +1020,15 @@ dialog::backdrop{background:rgba(10,16,30,.65)}
     Array.from(picker.files || []).forEach(function (file) {
       var row = document.createElement('li'); row.className = 'upload-item';
       var name = document.createElement('span'); name.className = 'upload-name'; name.textContent = file.name;
-      var status = document.createElement('span'); status.className = 'upload-status'; status.setAttribute('aria-live','polite');
+      var status = document.createElement('span'); status.className = 'upload-status'; status.setAttribute('aria-hidden','true');
+      var announcement = document.createElement('span'); announcement.className = 'sr-only upload-announcement'; announcement.setAttribute('role','status'); announcement.setAttribute('aria-live','polite'); announcement.setAttribute('aria-atomic','true');
       var progress = document.createElement('progress'); progress.className = 'upload-progress'; progress.max = 100; progress.value = 0;
       progress.setAttribute('aria-label',file.name+' 上传进度');
       var actions = document.createElement('div'); actions.className = 'upload-actions';
       var cancelButton = document.createElement('button'); cancelButton.type = 'button'; cancelButton.className = 'action'; cancelButton.textContent = '取消'; cancelButton.setAttribute('aria-label','取消上传 '+file.name);
-      var entry = {file:file,row:row,status:status,progress:progress,cancel:cancelButton,offset:0,sent:0};
+      var entry = {file:file,row:row,status:status,announcement:announcement,progress:progress,cancel:cancelButton,offset:0,sent:0};
       cancelButton.addEventListener('click',function () { return cancel(entry); });
-      actions.appendChild(cancelButton); row.appendChild(name); row.appendChild(status); row.appendChild(progress); row.appendChild(actions); uploadList.appendChild(row); entries.push(entry);
+      actions.appendChild(cancelButton); row.appendChild(name); row.appendChild(status); row.appendChild(progress); row.appendChild(actions); row.appendChild(announcement); uploadList.appendChild(row); entries.push(entry);
       state(entry,file.size > maxUploadBytes ? 'error' : 'pending',file.size > maxUploadBytes ? '无法上传：单文件超过 1 GiB 限制。' : '等待上传；重新选择原文件可续传');
     });
     picker.value = '';
@@ -1031,10 +1043,14 @@ dialog::backdrop{background:rgba(10,16,30,.65)}
         if (finished || entry.cancelled || !event.lengthComputable) return;
         var loaded = Math.min(end-start,Math.max(0,event.loaded));
         entry.sent = start+loaded; entry.progress.value = entry.file.size ? entry.sent/entry.file.size*100 : 0;
-        var seconds = Math.max(.001,(performance.now()-entry.started)/1000);
+        var now = performance.now();
+        var seconds = Math.max(.001,(now-entry.started)/1000);
         var speed = Math.max(0,(entry.sent-entry.base)/seconds);
         var remain = speed ? Math.ceil((entry.file.size-entry.sent)/speed) : null;
-        state(entry,'uploading','正在上传 '+Math.floor(entry.progress.value)+'% · '+(speed/1024/1024).toFixed(2)+' MiB/s · '+(remain === null ? '估算中' : '剩余约 '+remain+' 秒')+'（等待电脑确认保存）'); updateTotal();
+        var announceProgress = entry.lastAnnouncementAt === undefined ||
+          entry.progress.value-entry.lastAnnouncedPercent >= 5 ||
+          now-entry.lastAnnouncementAt >= 5000;
+        state(entry,'uploading','正在上传 '+Math.floor(entry.progress.value)+'% · '+(speed/1024/1024).toFixed(2)+' MiB/s · '+(remain === null ? '估算中' : '剩余约 '+remain+' 秒')+'（等待电脑确认保存）',announceProgress); updateTotal();
       });
       xhr.addEventListener('load',function () {
         if (xhr.status === 409) { finish(null,{conflict:true}); return; }
@@ -1102,7 +1118,7 @@ dialog::backdrop{background:rgba(10,16,30,.65)}
         }
       }
       if (entry.cancelled) return;
-      state(entry,'uploading','数据已发送，等待电脑确认完整保存，此阶段无法取消…');
+      state(entry,'uploading','数据已发送，等待电脑确认完整保存，此阶段无法取消…',true);
       entry.completing = true; entry.cancel.disabled = true;
       var saved;
       try { saved = await control('POST','/uploads/'+entry.id+'/complete',201); }

@@ -111,6 +111,7 @@ function file(name='x',size=1,lastModified=123) {
 }
 const state = row=>row.attributes['data-state'];
 const status = row=>row.children[1].textContent;
+const liveStatus = row=>row.children[4];
 const progress = row=>row.children[2];
 const cancel = row=>row.children[3].children[0];
 async function response(xhr,code,body) { xhr.status=code; xhr.responseText=typeof body==='string'?body:JSON.stringify(body); await xhr.emit('load'); await tick(); }
@@ -121,7 +122,11 @@ async function checks() {
   const app=setup(), first=file('</script><img src=x> 空格 &?#%.txt',4194305);
   await app.choose([first,file('empty',0)]);
   assert.equal(app.rows[0].children[0].textContent,first.name);
-  const cancelName0=app.rows[0].children[3].children[0].getAttribute('aria-label');
+  assert.equal(app.rows[0].children[1].getAttribute('aria-hidden'),'true');
+   assert.equal(liveStatus(app.rows[0]).getAttribute('role'),'status');
+   assert.equal(liveStatus(app.rows[0]).getAttribute('aria-live'),'polite');
+   assert.ok(liveStatus(app.rows[0]).textContent.includes(first.name));
+   const cancelName0=app.rows[0].children[3].children[0].getAttribute('aria-label');
   const cancelName1=app.rows[1].children[3].children[0].getAttribute('aria-label');
   assert.equal(cancelName0,'取消上传 '+first.name); assert.equal(cancelName1,'取消上传 empty'); assert.notEqual(cancelName0,cancelName1);
   assert.equal(app.requests.length+app.fetches.length,0,'selection never auto-uploads');
@@ -136,6 +141,7 @@ async function checks() {
   const collisionA=setup(), collisionB=setup();
   const collisionDoneA=await start(collisionA,collisionFile(97)); const fingerprintA=collisionA.fetches[0].url;
   await created(collisionA,131073); await collisionA.requests[0].emit('error'); await collisionDoneA.done;
+   assert.match(liveStatus(collisionA.rows[0]).textContent,/same\.bin：上传暂停，未确认保存/,'upload failures are announced immediately');
   const collisionDoneB=await start(collisionB,collisionFile(98)); const fingerprintB=collisionB.fetches[0].url;
   assert.notEqual(fingerprintA,fingerprintB,'interior byte differences cannot collide when samples match');
   await created(collisionB,131073); await collisionB.requests[0].emit('error'); await collisionDoneB.done;
@@ -151,7 +157,15 @@ async function checks() {
   await xhr.upload.emit('progress',{lengthComputable:true,loaded:2097152,total:4194304});
   assert.ok(progress(app.rows[0]).value>49 && progress(app.rows[0]).value<50);
   assert.match(status(app.rows[0]),/MiB\/s.*剩余约/);
-  await xhr.upload.emit('progress',{lengthComputable:false});
+  const firstAnnouncement=liveStatus(app.rows[0]).textContent;
+   assert.match(firstAnnouncement,/49%/);
+   await xhr.upload.emit('progress',{lengthComputable:true,loaded:2097153,total:4194304});
+   assert.match(status(app.rows[0]),/50%/,'visible progress stays current for each XHR event');
+   assert.equal(liveStatus(app.rows[0]).textContent,firstAnnouncement,'sub-5% updates are not repeatedly announced');
+   await xhr.upload.emit('progress',{lengthComputable:true,loaded:3000000,total:4194304});
+   assert.match(status(app.rows[0]),/71%/);
+   assert.match(liveStatus(app.rows[0]).textContent,/71%/,'live announcement resumes after a meaningful progress change');
+   await xhr.upload.emit('progress',{lengthComputable:false});
   await response(xhr,200,{id,size:first.size,offset:4194304});
   assert.equal(app.requests.length,2,'one sequential chunk at a time');
   assert.equal(app.requests[1].url,'/uploads/'+id+'?offset=4194304'); assert.equal(app.requests[1].body.size,1);
@@ -163,7 +177,7 @@ async function checks() {
   assert.equal(state(app.rows[0]),'uploading'); assert.match(status(app.rows[0]),/此阶段无法取消/);
   assert.equal(app.fetches.some(request=>request.method==='DELETE'),false,'completed files are never reported as cancelled or cleaned');
   await complete(app,first.size,'<img onerror=evil()>');
-  assert.equal(state(app.rows[0]),'success'); assert.ok(status(app.rows[0]).endsWith('<img onerror=evil()>'));
+  assert.equal(state(app.rows[0]),'success'); assert.ok(status(app.rows[0]).endsWith('<img onerror=evil()>')); assert.ok(liveStatus(app.rows[0]).textContent.startsWith(first.name+'：上传成功'),'completion is announced immediately');
   assert.equal(app.fetches.at(-1).method,'POST'); await created(app,0); // empty file has no PATCH
   assert.equal(app.requests.length,2); await complete(app,0); await done;
   assert.match(app.summary.textContent,/成功 2 个/); assert.equal(app.picker.disabled,false); assert.equal(app.picker.value,'');
