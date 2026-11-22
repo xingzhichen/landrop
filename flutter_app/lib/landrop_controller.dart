@@ -1184,6 +1184,33 @@ class LanDropController extends ChangeNotifier {
     return capture;
   }
 
+  Future<String> _resolveManagedFileDirectoryPath(String requestedPath) async {
+    if (await _hasSymbolicLinkComponent(requestedPath)) {
+      throw FileSystemException(
+          'Managed-file directory contains a symbolic link', requestedPath);
+    }
+    final canonical = p.normalize(
+        p.absolute(await Directory(requestedPath).resolveSymbolicLinks()));
+    if (await _hasSymbolicLinkComponent(requestedPath)) {
+      throw FileSystemException(
+          'Managed-file directory contains a symbolic link', requestedPath);
+    }
+    if (canonical != requestedPath) {
+      // Windows can resolve a harmless 8.3 spelling to the long path. Accept
+      // only when the no-reparse native bridge proves both spellings name the
+      // same directory object; never trust string canonicalization alone.
+      final requestedIdentity =
+          await _captureManagedRootIdentity(requestedPath);
+      final canonicalIdentity = await _captureManagedRootIdentity(canonical);
+      if (requestedIdentity != canonicalIdentity) {
+        throw FileSystemException(
+            'Managed-file directory identity differs after canonicalization',
+            requestedPath);
+      }
+    }
+    return canonical;
+  }
+
   Future<String> _managedFileDirectoryPath() async {
     if (_fileDirectory == null) {
       final support = await getApplicationSupportDirectory();
@@ -1195,6 +1222,10 @@ class LanDropController extends ChangeNotifier {
     if (await _hasSymbolicLinkComponent(requestedPath)) {
       throw FileSystemException(
           'Managed-file directory contains a symbolic link', requestedPath);
+    }
+    if (await FileSystemEntity.type(requestedPath, followLinks: false) ==
+        FileSystemEntityType.directory) {
+      return _resolveManagedFileDirectoryPath(requestedPath);
     }
     return requestedPath;
   }
@@ -1222,11 +1253,7 @@ class LanDropController extends ChangeNotifier {
       throw FileSystemException(
           'Managed-file directory is not a real directory', requestedPath);
     }
-    final canonical = await Directory(requestedPath).resolveSymbolicLinks();
-    if (!p.equals(canonical, requestedPath)) {
-      throw FileSystemException(
-          'Managed-file directory is not canonical', requestedPath);
-    }
+    final canonical = await _resolveManagedFileDirectoryPath(requestedPath);
     final identity = await _captureManagedRootIdentity(canonical);
     final directoryChanged = _managedRootIdentityConflict ||
         (_fileDirectoryCanonical != null &&

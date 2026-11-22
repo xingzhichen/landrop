@@ -80,7 +80,35 @@ bool _isSafeReceiveLeaf(String value) =>
     !value.contains('\\') &&
     !value.contains('\u0000');
 
-String _directoryKey(String path) => p.normalize(p.absolute(path));
+String _directoryKey(String path) {
+  final absolute = p.normalize(p.absolute(path));
+  if (!Platform.isWindows) return absolute;
+
+  // The Windows runner's temp path may use an 8.3 alias (RUNNER~1), while
+  // controller paths are resolved to their long form before native calls.
+  // Canonicalize the existing prefix so test identities follow the same leaf.
+  var existingPrefix = absolute;
+  final suffix = <String>[];
+  try {
+    while (FileSystemEntity.typeSync(existingPrefix, followLinks: false) ==
+        FileSystemEntityType.notFound) {
+      final parent = p.dirname(existingPrefix);
+      if (parent == existingPrefix) return absolute;
+      suffix.insert(0, p.basename(existingPrefix));
+      existingPrefix = parent;
+    }
+    final existingType =
+        FileSystemEntity.typeSync(existingPrefix, followLinks: false);
+    if (existingType == FileSystemEntityType.link ||
+        (suffix.isNotEmpty && existingType != FileSystemEntityType.directory)) {
+      return absolute;
+    }
+    final canonical = File(existingPrefix).resolveSymbolicLinksSync();
+    return p.normalize(p.joinAll([canonical, ...suffix]));
+  } on FileSystemException {
+    return absolute;
+  }
+}
 
 String _identityForDirectory(String path) {
   final key = _directoryKey(path);

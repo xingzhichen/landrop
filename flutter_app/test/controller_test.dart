@@ -215,7 +215,9 @@ void main() {
           received.receivedAt
               .isAfter(DateTime.now().subtract(const Duration(minutes: 1))),
           isTrue);
-      expect(received.path, '$pagePath${Platform.pathSeparator}照片.txt');
+      final canonicalPagePath =
+          await Directory(pagePath).resolveSymbolicLinks();
+      expect(received.path, p.join(canonicalPagePath, '照片.txt'));
       expect(await File(received.path).readAsString(), '你好电脑');
       expect(notifications, greaterThan(0));
 
