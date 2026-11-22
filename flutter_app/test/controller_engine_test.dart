@@ -5585,7 +5585,12 @@ void main() {
     expect(controller.receivedFiles, hasLength(2));
     final canonicalCustom = await Directory(custom).resolveSymbolicLinks();
     for (final file in controller.receivedFiles) {
-      expect(p.isWithin(canonicalCustom, file.path), true);
+      final canonicalFile = await File(file.path).resolveSymbolicLinks();
+      expect(
+        p.isWithin(canonicalCustom, canonicalFile),
+        isTrue,
+        reason: 'received file escaped the custom root: ${file.path}',
+      );
     }
     expect(await blocked.readAsString(), 'not a directory');
   });
