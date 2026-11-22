@@ -81,6 +81,7 @@ Future<Reply> request(int port, String method, String path,
       'Content-Length: ${body.length}\r\n$extra'
       'Connection: close\r\n\r\n');
   socket.add(body);
+  await socket.flush();
   final data = await socket.fold<List<int>>(
       [], (a, b) => a..addAll(b)).timeout(const Duration(seconds: 15));
   return parseHttpReply(data);
@@ -3354,11 +3355,14 @@ void main() {
         await controller.start(page);
         port = controller.portFor(page)!;
       }
-      expect((await request(port, 'GET', '/uploads/$id')).json['offset'], 7);
-      expect(
-          (await request(port, 'PATCH', '/uploads/$id?offset=7', body: [1]))
-              .json['offset'],
-          8);
+      final resumed = await request(port, 'GET', '/uploads/$id');
+      expect(resumed.json['offset'], 7);
+      final appended =
+          await request(port, 'PATCH', '/uploads/$id?offset=7', body: [1]);
+      expect(appended.status, 200,
+          reason: 'stop=$stop; response=${utf8.decode(appended.bytes)}');
+      expect(appended.json['offset'], 8,
+          reason: 'stop=$stop; response=${utf8.decode(appended.bytes)}');
       await controller.cancelTransfer(id);
     }
   });
