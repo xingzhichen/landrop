@@ -4706,7 +4706,9 @@ void main() {
         await stalledResponse('PATCH /uploads/$id?offset=0 HTTP/1.1', 6);
     expect(patch, contains('408 Request Time-out'));
     expect(patch, contains('上传长时间无数据'));
-    await Future<void>.delayed(const Duration(milliseconds: 300));
+    // The 408 can reach the client before Windows finishes its async request
+    // cleanup and releases the per-session busy lock.
+    await until(() => controller.uploadRegistryPageCountForTesting == 0);
     expect((await request(port, 'GET', '/uploads/$id')).json['offset'], 0);
     final resumed = await request(port, 'PATCH', '/uploads/$id?offset=0',
         body: [97, 98, 99, 100, 101, 102]);

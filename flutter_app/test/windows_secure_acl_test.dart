@@ -10,8 +10,9 @@ void main() {
         File('windows/runner/private_receive_entry.cpp').readAsStringSync();
     final securityHelper =
         File('windows/runner/private_receive_security.cpp').readAsStringSync();
-    final nativeTest =
-        File('windows/runner/secure_fs_acl_test.cpp').readAsStringSync();
+    final nativeTest = File('windows/runner/secure_fs_acl_test.cpp')
+        .readAsStringSync()
+        .replaceAll('\r\n', '\n');
     final cmake = File('windows/runner/CMakeLists.txt').readAsStringSync();
     final workflow =
         File('../.github/workflows/build-desktop.yml').readAsStringSync();
