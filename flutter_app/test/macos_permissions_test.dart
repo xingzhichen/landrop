@@ -108,8 +108,9 @@ void main() {
 
   test('CI packages with explicit entitlements and verifies the signed app',
       () {
-    final workflow =
-        File('../.github/workflows/build-desktop.yml').readAsStringSync();
+    final workflow = File('../.github/workflows/build-desktop.yml')
+        .readAsStringSync()
+        .replaceAll('\r\n', '\n');
     final script = File('tool/package_macos.sh').readAsStringSync();
     expect(workflow, contains('bash tool/package_macos.sh'));
     expect(

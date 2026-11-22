@@ -2,6 +2,7 @@ import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:landrop/download_page.dart';
+import 'package:path/path.dart' as p;
 
 void main() {
   test('renders a responsive local-only download page', () {
@@ -135,12 +136,22 @@ void main() {
   test(
     'session upload JavaScript exercises actual DOM fetch and raw chunk XHR',
     () {
-      final result = Process.runSync('node', [
-        'test/web/download_page_behavior.cjs',
-        _script(renderDownloadPage('测试', [])),
-      ]);
-      expect(result.exitCode, 0, reason: '${result.stdout}\n${result.stderr}');
-      expect(result.stdout, contains('upload behavior checks passed'));
+      final tempDirectory =
+          Directory.systemTemp.createTempSync('landrop-download-js-');
+      try {
+        final pageScript = File(p.join(tempDirectory.path, 'page.js'));
+        pageScript.writeAsStringSync(_script(renderDownloadPage('测试', [])));
+        final result = Process.runSync(
+          'node',
+          ['test/web/download_page_behavior.cjs'],
+          environment: {'LANDROP_PAGE_SCRIPT_FILE': pageScript.path},
+        );
+        expect(result.exitCode, 0,
+            reason: '${result.stdout}\n${result.stderr}');
+        expect(result.stdout, contains('upload behavior checks passed'));
+      } finally {
+        tempDirectory.deleteSync(recursive: true);
+      }
     },
     skip: _hasNode ? false : 'Node.js unavailable; rendering tests still run',
   );

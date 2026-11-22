@@ -3042,7 +3042,7 @@ void main() {
     expect(await Directory(p.dirname(quarantine.path)).exists(), isFalse);
     expect(await FileSystemEntity.type(dateDirectory.path, followLinks: false),
         FileSystemEntityType.notFound);
-  });
+  }, skip: Platform.isWindows ? 'POSIX receive-quarantine behavior' : false);
 
   test('page deletion completes after its durable page-list commit', () async {
     final id = await create(size: 0);
@@ -3372,10 +3372,12 @@ void main() {
     final target = await controller.receiveDirectoryFor(page);
     expect(p.dirname(target), p.join(base, page.id));
     expect(p.basename(target), matches(RegExp(r'^\d{4}-\d{2}-\d{2}$')));
+    final canonicalTarget = await Directory(target).resolveSymbolicLinks();
     // A custom target must not materialize or require the unused default root.
     expect(controller.receiveDirectory, isNull);
     expect((await upload(port, 'photo.png', 'image')).$1, 201);
-    expect(controller.receivedFiles.single.path, p.join(target, 'photo.png'));
+    expect(controller.receivedFiles.single.path,
+        p.join(canonicalTarget, 'photo.png'));
     await controller.addPaths(page, [controller.receivedFiles.single.path]);
     final image =
         await request(port, 'GET', '/file/${page.files.single.id}?inline=1');
@@ -3395,7 +3397,8 @@ void main() {
     await controller.initialize();
     expect(controller.pages.single.receiveDirectory, base);
     expect(controller.pages.single.organizeByDate, true);
-    expect(controller.receivedFiles.single.path, p.join(target, 'photo.png'));
+    expect(controller.receivedFiles.single.path,
+        p.join(canonicalTarget, 'photo.png'));
   });
 
   test('all session mutations enforce origin, session count is bounded',

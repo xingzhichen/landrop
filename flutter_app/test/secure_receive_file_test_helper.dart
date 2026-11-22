@@ -44,6 +44,12 @@ void failNextReceivePublishAfterMoveForTest(String destinationPath) {
 bool receivePublishFailureCleanupCompletedForTest() =>
     _receivePublishFailureCleanup?.isCompleted ?? false;
 
+void _completeReceivePublishFailureCleanup(String path) {
+  if (_receivePublishFailureCleanupPath != _directoryKey(path)) return;
+  final cleanup = _receivePublishFailureCleanup;
+  if (cleanup != null && !cleanup.isCompleted) cleanup.complete();
+}
+
 Future<T> _serializeReceivePublish<T>(Future<T> Function() action) async {
   final previous = _receivePublishTail;
   final completion = Completer<void>();
@@ -687,16 +693,16 @@ void installSecureReceiveFileMock() {
           expectedQuarantineIdentity: expectedQuarantineIdentity,
           sourceParentMissing: sourceParentMissing,
         );
-        if (_receivePublishFailureCleanupPath == _directoryKey(target)) {
-          final cleanup = _receivePublishFailureCleanup;
-          if (cleanup != null && !cleanup.isCompleted) cleanup.complete();
-        }
+        _completeReceivePublishFailureCleanup(target);
         return null;
       }
 
       final type = await FileSystemEntity.type(target, followLinks: false);
       if (type == FileSystemEntityType.notFound) {
-        if (call.method == 'unlinkReceiveEntry') return null;
+        if (call.method == 'unlinkReceiveEntry') {
+          _completeReceivePublishFailureCleanup(target);
+          return null;
+        }
         throw PlatformException(
             code: 'missing_leaf', message: 'Receive entry is missing');
       }
@@ -729,6 +735,9 @@ void installSecureReceiveFileMock() {
       }
       await File(target).delete();
       _leafIdentities.remove(_directoryKey(target));
+      if (call.method == 'unlinkReceiveEntry') {
+        _completeReceivePublishFailureCleanup(target);
+      }
       return null;
     },
   );

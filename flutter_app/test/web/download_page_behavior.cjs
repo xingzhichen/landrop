@@ -1,7 +1,9 @@
 'use strict';
 const assert = require('node:assert/strict');
 const crypto = require('node:crypto');
-const pageScript = process.argv[2];
+const pageScript = process.env.LANDROP_PAGE_SCRIPT_FILE
+  ? require('node:fs').readFileSync(process.env.LANDROP_PAGE_SCRIPT_FILE, 'utf8')
+  : process.argv[2];
 const id = '15bd1547-cae0-4b5e-9662-2f24b2ef6e89';
 class Element {
   constructor() {
