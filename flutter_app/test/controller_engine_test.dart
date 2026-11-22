@@ -1335,14 +1335,23 @@ void main() {
       port = controller.portFor(page)!;
       expect((await request(port, 'GET', '/manifest')).status, 200);
       if (port != previousPort) {
+        final staleConnection =
+            Socket.connect(InternetAddress.loopbackIPv4, previousPort);
         try {
           final staleListener =
-              await Socket.connect(InternetAddress.loopbackIPv4, previousPort)
-                  .timeout(const Duration(seconds: 2));
+              await staleConnection.timeout(const Duration(seconds: 2));
           staleListener.destroy();
           fail('The old listener still accepts connections.');
         } on SocketException {
           // A different new port means the old listener should be released.
+        } on TimeoutException {
+          // Some Windows runners silently drop SYNs to unbound local ports.
+          // Treat no connection within the probe window as released, but close
+          // the socket if the OS eventually completes the pending connect.
+          unawaited(staleConnection.then<void>(
+            (socket) => socket.destroy(),
+            onError: (Object _) {},
+          ));
         }
       }
       expect((await request(port, 'GET', '/uploads/$id')).json,
