@@ -333,11 +333,14 @@ bool RunTest() {
     return Fail(L"Could not capture current user SID");
   }
 
+  // Match the final receive-directory handle used by production: relative
+  // creation requires FILE_ADD_FILE, and concurrent receives need write sharing.
   ScopedHandle parent(::CreateFileW(
       directory.path().c_str(),
-      FILE_LIST_DIRECTORY | FILE_TRAVERSE | FILE_READ_ATTRIBUTES | SYNCHRONIZE,
-      FILE_SHARE_READ, nullptr,
-      OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, nullptr));
+      FILE_LIST_DIRECTORY | FILE_ADD_FILE | FILE_TRAVERSE |
+          FILE_READ_ATTRIBUTES | SYNCHRONIZE,
+      FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING,
+      FILE_FLAG_BACKUP_SEMANTICS, nullptr));
   if (parent.get() == INVALID_HANDLE_VALUE) {
     return Fail(L"Could not open test parent directory");
   }

@@ -93,6 +93,9 @@ void main() {
     expect(nativeTest, contains('owner_ace_is_inherited'));
     expect(nativeTest, contains('FILE_EXECUTE'));
     expect(nativeTest, contains('SE_DACL_PROTECTED'));
+    expect(nativeTest,
+        contains('FILE_LIST_DIRECTORY | FILE_ADD_FILE | FILE_TRAVERSE'));
+    expect(nativeTest, contains('FILE_SHARE_READ | FILE_SHARE_WRITE'));
     expect(cmake, contains('private_receive_entry.cpp'));
     expect(cmake, contains('private_receive_security.cpp'));
     expect(cmake, contains('secure_fs_acl_test EXCLUDE_FROM_ALL'));

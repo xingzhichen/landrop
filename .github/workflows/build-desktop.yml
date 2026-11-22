@@ -65,16 +65,33 @@ jobs:
                 $testNames[[string]$event.test.id] = $event.test.name
               }
             }
+            $activeTests = [System.Collections.Generic.List[string]]::new()
             foreach ($event in $events) {
-              if ($event.type -eq 'testDone' -and $event.result -eq 'failure') {
+              if ($event.type -eq 'testStart' -and $event.test.id -ne $null) {
+                $activeTests.Add([string]$event.test.id)
+              }
+              if ($event.type -eq 'testDone') {
                 $id = [string]$event.testID
-                $name = $testNames[$id]
-                if (-not $name) { $name = "testID=$id" }
-                Write-Output "::error title=Flutter test failure::$name"
+                if ($event.result -and $event.result -notin @('success', 'skipped')) {
+                  $name = $testNames[$id]
+                  if (-not $name) { $name = "testID=$id" }
+                  Write-Output "::error title=Flutter test failure::$name (result=$($event.result))"
+                }
+                if ($id -and $activeTests.Contains($id)) { [void]$activeTests.Remove($id) }
               }
               if ($event.type -eq 'error' -and $event.error) {
-                $message = ($event.error -replace '[\r\n]+', ' ')
-                Write-Output "::error title=Flutter test detail::$message"
+                $id = [string]$event.testID
+                $name = $testNames[$id]
+                if (-not $name -and $activeTests.Count -gt 0) {
+                  $name = $testNames[$activeTests[$activeTests.Count - 1]]
+                }
+                if (-not $name) { $name = "testID=$id" }
+                $message = [string]$event.error
+                $stack = [string]$event.stackTrace
+                $details = "$name; $message $stack"
+                $details = $details -replace '[\r\n]+', ' ' -replace '%', '%25' -replace '::', '%3A%3A'
+                if ($details.Length -gt 4000) { $details = $details.Substring(0, 4000) }
+                Write-Output "::error title=Flutter test detail::$details"
               }
             }
           }

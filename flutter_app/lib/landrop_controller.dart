@@ -6122,14 +6122,18 @@ class LanDropController extends ChangeNotifier {
     final marker = job.cancellationMarker;
     final cancelWorker = job.cancelWorker;
     final workerFinished = job.workerFinished;
+    // Dispatch stream cancellation before awaiting marker I/O. The callback
+    // synchronously closes its admission gate; otherwise a response released
+    // during marker creation could finish and overwrite the cancelled status.
+    final cancelResponse = job.cancelResponse;
+    final responseCancellation = cancelResponse?.call();
     if (marker != null && cancelWorker != null) {
       try {
         await marker.create();
       } catch (_) {}
       if (!cancelWorker.isCompleted) cancelWorker.complete();
     }
-    final cancelResponse = job.cancelResponse;
-    if (cancelResponse != null) await cancelResponse();
+    if (responseCancellation != null) await responseCancellation;
     if (workerFinished != null) await workerFinished.future;
     await job.requestFinished.future;
   }
