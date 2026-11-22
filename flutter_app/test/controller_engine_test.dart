@@ -5535,7 +5535,8 @@ void main() {
 
     redirectNextResolution = true;
     expect((await request(port, 'POST', '/uploads/$id/complete')).status, 201);
-    final pinnedTarget = File(p.join(canonicalRoot.path, page.id, 'a.txt'));
+    final canonicalReceiveRoot = await canonicalRoot.resolveSymbolicLinks();
+    final pinnedTarget = File(p.join(canonicalReceiveRoot, page.id, 'a.txt'));
     expect(await pinnedTarget.readAsString(), 'abcdef');
     expect(await outsidePart.readAsString(), 'secret');
     expect(controller.receivedFiles.single.path, pinnedTarget.path);
@@ -5582,8 +5583,9 @@ void main() {
     final id = await create(size: 0);
     expect((await request(port, 'POST', '/uploads/$id/complete')).status, 201);
     expect(controller.receivedFiles, hasLength(2));
+    final canonicalCustom = await Directory(custom).resolveSymbolicLinks();
     for (final file in controller.receivedFiles) {
-      expect(p.isWithin(custom, file.path), true);
+      expect(p.isWithin(canonicalCustom, file.path), true);
     }
     expect(await blocked.readAsString(), 'not a directory');
   });
