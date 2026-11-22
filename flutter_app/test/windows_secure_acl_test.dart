@@ -96,6 +96,7 @@ void main() {
     expect(nativeTest,
         contains('FILE_LIST_DIRECTORY | FILE_ADD_FILE | FILE_TRAVERSE'));
     expect(nativeTest, contains('FILE_SHARE_READ | FILE_SHARE_WRITE'));
+    expect(nativeTest, contains('::SetSecurityInfo(\n      legacy.get()'));
     expect(cmake, contains('private_receive_entry.cpp'));
     expect(cmake, contains('private_receive_security.cpp'));
     expect(cmake, contains('secure_fs_acl_test EXCLUDE_FROM_ALL'));

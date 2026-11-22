@@ -198,11 +198,20 @@ bool TestLegacyPartialRepair(const ScopedTestDirectory& directory, PSID world_si
                              PSID expected_owner) {
   ScopedHandle legacy(::CreateFileW(
       directory.legacy_file().c_str(),
-      GENERIC_READ | GENERIC_WRITE | READ_CONTROL | WRITE_DAC,
+      GENERIC_READ | GENERIC_WRITE | READ_CONTROL | WRITE_DAC | WRITE_OWNER,
       FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
       CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr));
   if (legacy.get() == INVALID_HANDLE_VALUE) {
     return Fail(L"Could not create legacy partial with inherited DACL");
+  }
+  // Elevated CI processes may default new-file ownership to the Administrators
+  // group. Model an app-created partial by pinning it to this process user while
+  // retaining the deliberately inherited, permissive DACL under test.
+  const DWORD owner_error = ::SetSecurityInfo(
+      legacy.get(), SE_FILE_OBJECT, OWNER_SECURITY_INFORMATION, expected_owner,
+      nullptr, nullptr, nullptr);
+  if (owner_error != ERROR_SUCCESS) {
+    return Fail(L"Could not set legacy partial owner", owner_error);
   }
   constexpr char kPayload[] = "resumable partial data";
   constexpr DWORD kPayloadSize =
