@@ -394,7 +394,7 @@ dialog::backdrop{background:rgba(10,16,30,.65)}
 <p class="upload-summary" id="upload-summary" role="status" aria-live="polite">选择文件后，点击上传到电脑。</p>
 <p class="upload-recovery-warning" id="upload-recovery-warning" role="status" aria-live="polite" hidden></p>
 <ul class="upload-list" id="upload-list" aria-label="上传文件及进度"></ul>
-<details class="upload-details"><summary>上传限制与保存说明</summary><p class="upload-help" id="upload-help">可多选文件，按顺序逐个上传，单文件最大 1 GiB（1,073,741,824 字节）。上传成功后文件会自动保存到电脑的接收目录，无需在电脑上逐个确认；请以每个文件的成功或失败反馈为准。网络中断可点击「继续上传」。刷新或重新打开页面后，需重新选择原文件续传。如果浏览器允许，会在当前标签页本机保存最多 64 个文件指纹与续传编号（不含文件内容），成功或取消后会清除；刷新后仍需重新选择文件。上传文件归属于当前传输。</p></details>
+<details class="upload-details"><summary>上传限制与保存说明</summary><p class="upload-help" id="upload-help">可多选文件，按顺序逐个上传，单文件最大 1 GiB（1,073,741,824 字节）。电脑最多为未完成上传预留 4 GiB（按文件声明大小计算）；额度已满时，请先完成或取消其他未完成上传后重试。上传成功后文件会自动保存到电脑的接收目录，无需在电脑上逐个确认；请以每个文件的成功或失败反馈为准。网络中断可点击「继续上传」。刷新或重新打开页面后，需重新选择原文件续传。如果浏览器允许，会在当前标签页本机保存最多 64 个文件指纹与续传编号（不含文件内容），成功或取消后会清除；刷新后仍需重新选择文件。上传文件归属于当前传输。</p></details>
 <noscript><p class="upload-help">上传功能需要启用 JavaScript；文件下载仍可直接使用。</p></noscript>
 </section><p class="network-note"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true"><path d="M2 8a16 16 0 0 1 20 0M5 12a11 11 0 0 1 14 0M8.5 16a5.5 5.5 0 0 1 7 0"/><circle cx="12" cy="20" r="1" fill="currentColor" stroke="none"/></svg><span><strong>请连接同一 Wi-Fi</strong><br>传输时请保持电脑上的 LanDrop 和本页面打开。</span></p></aside>
 </div><footer class="footer"><span>LanDrop · 局域网文件传输</span><span>文件通过此电脑的本地服务传输</span></footer></main>

@@ -412,6 +412,7 @@ class LanDropController extends ChangeNotifier {
     @visibleForTesting int? fileDownloadLimit,
     @visibleForTesting Future<void> Function()? beforeFileStream,
     @visibleForTesting int? pendingSessionLimit,
+    @visibleForTesting int? pendingUploadByteLimit,
     @visibleForTesting int? httpRequestLimit,
     @visibleForTesting int? httpRejectionLimit,
     @visibleForTesting Future<void> Function()? beforeHttpServe,
@@ -423,6 +424,7 @@ class LanDropController extends ChangeNotifier {
     @visibleForTesting Future<void> Function()? beforeAddFileCommit,
   })  : assert(fileDownloadLimit == null || fileDownloadLimit > 0),
         assert(pendingSessionLimit == null || pendingSessionLimit > 0),
+        assert(pendingUploadByteLimit == null || pendingUploadByteLimit > 0),
         assert(httpRequestLimit == null || httpRequestLimit > 0),
         assert(httpRejectionLimit == null || httpRejectionLimit > 0),
         _receiveBaseDirectory = receiveDirectory,
@@ -435,6 +437,8 @@ class LanDropController extends ChangeNotifier {
         _fileDownloadLimit = fileDownloadLimit ?? _maxConcurrentFileDownloads,
         _beforeFileStream = beforeFileStream,
         _pendingSessionLimit = pendingSessionLimit ?? _maxPendingUploadSessions,
+        _pendingUploadByteLimit =
+            pendingUploadByteLimit ?? _maxPendingUploadBytes,
         _httpRequestLimit = httpRequestLimit ?? _maxConcurrentHttpRequests,
         _httpRejectionLimit =
             httpRejectionLimit ?? _maxConcurrentHttpRejections,
@@ -482,6 +486,8 @@ class LanDropController extends ChangeNotifier {
   final Map<String, String> _canonicalSources = {};
   Future<void> _persistQueue = Future.value();
   static const _maxUploadBytes = 1024 * 1024 * 1024;
+  // Reserve declared sizes so stalled sessions cannot exhaust receive storage.
+  static const _maxPendingUploadBytes = 4 * 1024 * 1024 * 1024;
   static const _maxConcurrentUploads = 8;
   static const _maxConcurrentHttpRequests = 64;
   static const _maxConcurrentHttpRejections = 16;
@@ -505,6 +511,7 @@ class LanDropController extends ChangeNotifier {
   final int _fileDownloadLimit;
   final Future<void> Function()? _beforeFileStream;
   final int _pendingSessionLimit;
+  final int _pendingUploadByteLimit;
   final int _httpRequestLimit;
   final int _httpRejectionLimit;
   final Future<void> Function()? _beforeHttpServe;
@@ -570,6 +577,30 @@ class LanDropController extends ChangeNotifier {
       _uploads.values.fold<int>(0, (count, uploads) => count + uploads.length);
   int get _pendingSessionCount =>
       _sessions.length + _unrestoredSessionRecords.length;
+
+  bool _pendingUploadByteBudgetAllows(int additionalBytes) {
+    var reserved = 0;
+    bool reserve(int bytes) {
+      if (bytes < 0 ||
+          bytes > _maxUploadBytes ||
+          bytes > _pendingUploadByteLimit - reserved) {
+        return false;
+      }
+      reserved += bytes;
+      return true;
+    }
+
+    for (final session in _sessions.values) {
+      if (!reserve(session.size)) return false;
+    }
+    for (final record in _unrestoredSessionRecords) {
+      final size = record['size'];
+      if (size is! int || !reserve(size)) return false;
+    }
+    return additionalBytes >= 0 &&
+        additionalBytes <= _pendingUploadByteLimit - reserved;
+  }
+
   int _sessionCountForPage(String pageId) =>
       _sessions.values.where((session) => session.pageId == pageId).length +
       _unrestoredSessionRecords
@@ -5258,6 +5289,11 @@ class LanDropController extends ChangeNotifier {
                 : 'Too many upload sessions');
         return;
       }
+      if (!_pendingUploadByteBudgetAllows(size)) {
+        await _rejectUpload(request, HttpStatus.tooManyRequests,
+            '待续传上传的预留空间已达到上限，请先取消部分未完成上传后重试');
+        return;
+      }
       // Reserve the global slot synchronously before the first filesystem await.
       final id = newId();
       final session = _Session(
@@ -5464,6 +5500,12 @@ class LanDropController extends ChangeNotifier {
           offsets?.length == 1 ? int.tryParse(offsets!.single) : null;
       if (offset != session.offset) {
         await _rejectUpload(request, 409, 'Offset conflict',
+            state: session.state);
+        return;
+      }
+      if (!_pendingUploadByteBudgetAllows(0)) {
+        await _rejectUpload(request, HttpStatus.tooManyRequests,
+            '待续传上传的预留空间已达到上限，请先取消部分未完成上传后重试',
             state: session.state);
         return;
       }

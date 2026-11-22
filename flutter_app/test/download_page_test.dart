@@ -70,6 +70,7 @@ void main() {
     expect(html, contains('如果浏览器允许'));
     expect(html, contains('aria-label="上传文件及进度"'));
     expect(html, contains('单文件最大 1 GiB（1,073,741,824 字节）'));
+    expect(html, contains('未完成上传预留 4 GiB'));
     expect(html, contains('自动保存到电脑的接收目录'));
     expect(html, contains('无需在电脑上逐个确认'));
     expect(html, contains('按顺序逐个上传'));

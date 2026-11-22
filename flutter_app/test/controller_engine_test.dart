@@ -3566,6 +3566,73 @@ void main() {
     await controller.cancelTransfer(newSession);
   });
 
+  test('pending upload byte budget reserves, restores and frees capacity',
+      () async {
+    await controller.stop(page);
+    controller.dispose();
+    controller = LanDropController(
+        receiveDirectory: directory, pendingUploadByteLimit: 20);
+    await controller.initialize();
+    page = controller.pages.single;
+    await controller.start(page);
+    port = controller.portFor(page)!;
+
+    final first = await create(fingerprint: 'budget-first', size: 7);
+    final second = await create(fingerprint: 'budget-second', size: 4);
+    await controller.stop(page);
+    controller.dispose();
+    controller = LanDropController(
+        receiveDirectory: directory, pendingUploadByteLimit: 10);
+    await controller.initialize();
+    page = controller.pages.single;
+    await controller.start(page);
+    port = controller.portFor(page)!;
+
+    expect(
+        (await request(port, 'PATCH', '/uploads/$first?offset=0', body: [1]))
+            .status,
+        HttpStatus.tooManyRequests);
+    final receivePath = await controller.receiveDirectoryFor(page);
+    Future<int> partCount() => Directory(receivePath)
+        .list()
+        .where((entry) => p.basename(entry.path).endsWith('.part'))
+        .length;
+    final beforeRejectedCreate = await partCount();
+    final rejectedCreate = await request(port, 'POST',
+        '/uploads?name=third.txt&size=4&fingerprint=budget-third');
+    expect(rejectedCreate.status, HttpStatus.tooManyRequests);
+    expect(await partCount(), beforeRejectedCreate);
+
+    await controller.cancelTransfer(second);
+    expect(
+        (await request(port, 'PATCH', '/uploads/$first?offset=0', body: [1]))
+            .status,
+        HttpStatus.ok);
+    expect(
+        (await request(port, 'POST',
+                '/uploads?name=third.txt&size=4&fingerprint=budget-third'))
+            .status,
+        HttpStatus.tooManyRequests);
+
+    await controller.cancelTransfer(first);
+    final acceptedCreate = await request(port, 'POST',
+        '/uploads?name=third.txt&size=4&fingerprint=budget-third');
+    expect(acceptedCreate.status, HttpStatus.created);
+    final acceptedId = acceptedCreate.json['id'] as String;
+    expect(
+        (await request(port, 'PATCH', '/uploads/$acceptedId?offset=0',
+                body: [1, 2, 3, 4]))
+            .status,
+        HttpStatus.ok);
+    expect(
+        (await request(port, 'POST', '/uploads/$acceptedId/complete')).status,
+        HttpStatus.created);
+    final afterCompletion = await request(port, 'POST',
+        '/uploads?name=fourth.txt&size=4&fingerprint=budget-after-completion');
+    expect(afterCompletion.status, HttpStatus.created);
+    await controller.cancelTransfer(afterCompletion.json['id'] as String);
+  });
+
   test('bodyless upload controls reject request bodies before side effects',
       () async {
     final id = await create();
