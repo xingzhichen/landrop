@@ -238,6 +238,38 @@ void main() {
               .toSet(),
           hasLength(2));
 
+      final lateOccupantPath = '$pagePath${Platform.pathSeparator}race.txt';
+      injectNextReceivePublishCollisionForTest(
+          lateOccupantPath, 'preserve this occupant');
+      final raced = await upload(port, 'race.txt', 'new upload');
+      expect(raced.$1, 201);
+      expect((jsonDecode(raced.$2) as Map)['name'], 'race (1).txt');
+      expect(await File(lateOccupantPath).readAsString(),
+          'preserve this occupant');
+      expect(await File(controller.receivedFiles.first.path).readAsString(),
+          'new upload');
+      await File(lateOccupantPath).delete();
+
+      final lostResponsePath =
+          '$pagePath${Platform.pathSeparator}lost-response.txt';
+      failNextReceivePublishAfterMoveForTest(lostResponsePath);
+      final lostResponse =
+          await upload(port, 'lost-response.txt', 'published before error');
+      expect(lostResponse.$1, 500);
+      expect(receivePublishFailureCleanupCompletedForTest(), isTrue,
+          reason: 'the error response must wait for rollback cleanup');
+      expect(await FileSystemEntity.type(lostResponsePath, followLinks: false),
+          FileSystemEntityType.notFound,
+          reason: 'cleanup warnings: ${controller.managedFileCleanupWarnings}');
+      expect(
+          controller.receivedFiles.any((file) => file.path == lostResponsePath),
+          isFalse);
+      final leftoverPartials = await Directory(pagePath)
+          .list(followLinks: false)
+          .where((entity) => p.basename(entity.path).endsWith('.part'))
+          .toList();
+      expect(leftoverPartials, isEmpty);
+
       final quarantineRootName =
           await upload(port, '.landrop-quarantine', 'reserved internal name');
       expect(quarantineRootName.$1, 201);
@@ -291,10 +323,20 @@ void main() {
           (jsonDecode(truncatedReserved.$2) as Map)['name'] as String;
       expect(truncatedReservedName, startsWith('_CON'));
       expect(truncatedReservedName, isNot('CON'));
-      final contents = await Directory(pagePath).list().toList();
+      final contents = await Directory(pagePath)
+          .list()
+          .where((entity) =>
+              p.basename(entity.path) !=
+              SecureReceiveFile.quarantineDirectoryName)
+          .toList();
       expect(contents, hasLength(controller.receivedFiles.length));
       expect(contents.whereType<File>().map((file) => p.basename(file.path)),
           everyElement(isNot(matches(RegExp(r'^\.[0-9a-f-]{36}\.part$')))));
+      final quarantineRoot = Directory(
+          p.join(pagePath, SecureReceiveFile.quarantineDirectoryName));
+      if (await quarantineRoot.exists()) {
+        expect(await quarantineRoot.list(followLinks: false).toList(), isEmpty);
+      }
     } finally {
       for (final page in controller.pages.toList()) {
         await controller.stop(page);

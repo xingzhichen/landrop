@@ -76,6 +76,29 @@ private func secureFsEntryIdentity(_ entryStat: stat) -> String {
   "dev=\(entryStat.st_dev);ino=\(entryStat.st_ino)"
 }
 
+/// Clears extended ACL entries; POSIX mode bits do not mask inherited ACEs on macOS.
+private func secureClearExtendedAcl(_ fd: Int32, operation: String) throws {
+  guard let emptyAcl = acl_init(0) else {
+    let code = errno
+    throw secureFsPosixError(operation, code: code)
+  }
+  defer { _ = acl_free(UnsafeMutableRawPointer(emptyAcl)) }
+  guard acl_set_fd_np(fd, emptyAcl, ACL_TYPE_EXTENDED) == 0 else {
+    let code = errno
+    throw secureFsPosixError(operation, code: code)
+  }
+}
+
+private func secureHasExtendedAcl(_ fd: Int32, operation: String) throws -> Bool {
+  guard let acl = acl_get_fd_np(fd, ACL_TYPE_EXTENDED) else {
+    let code = errno
+    if code == ENOENT { return false }
+    throw secureFsPosixError(operation, code: code)
+  }
+  _ = acl_free(UnsafeMutableRawPointer(acl))
+  return true
+}
+
 private func secureOpenReceiveQuarantine(rootFD: Int32) throws -> Int32 {
   var rootStat = stat()
   guard fstat(rootFD, &rootStat) == 0 else {
@@ -109,6 +132,7 @@ private func secureOpenReceiveQuarantine(rootFD: Int32) throws -> Int32 {
       let code = errno
       throw secureFsPosixError("secure receive quarantine permissions", code: code)
     }
+    try secureClearExtendedAcl(quarantineFD, operation: "secure receive quarantine ACL")
     guard fsync(rootFD) == 0 else {
       let code = errno
       throw secureFsPosixError("sync receive root", code: code)
@@ -261,6 +285,7 @@ private func secureOpenPinnedReceiveSessionQuarantine(
         (quarantineRootStat.st_mode & mode_t(0o7777)) == mode_t(0o700) else {
     throw secureFsError("The pinned receive quarantine root is not private and valid.")
   }
+  try secureClearExtendedAcl(quarantineRootFD, operation: "secure pinned receive quarantine root ACL")
 
   let sessionFD = sessionName.withCString { openat(quarantineRootFD, $0, directoryFlags) }
   guard sessionFD >= 0 else {
@@ -279,6 +304,7 @@ private func secureOpenPinnedReceiveSessionQuarantine(
           secureFsEntryIdentity(sessionStat) == expectedQuarantineIdentity else {
       throw secureFsError("The pinned receive quarantine identity or permissions changed.")
     }
+    try secureClearExtendedAcl(sessionFD, operation: "secure pinned receive quarantine session ACL")
   } catch {
     _ = close(sessionFD)
     throw error
@@ -356,6 +382,7 @@ private func securePrepareReceiveQuarantine(
       let code = errno
       throw secureFsPosixError("secure receive quarantine session permissions", code: code)
     }
+    try secureClearExtendedAcl(sessionFD, operation: "secure receive quarantine session ACL")
     guard fstat(sessionFD, &sessionStat) == 0 else {
       let code = errno
       throw secureFsPosixError("verify receive quarantine session", code: code)
@@ -538,15 +565,23 @@ private func secureOpenValidatedReceiveParent(
   return parentFD
 }
 
-private func secureCreateReceiveEntry(
+private func securePublishReceiveEntry(
   root: String,
   relativeParent: String,
   leaf: String,
+  destinationLeaf: String,
   expectedRootIdentity: String,
-  expectedParentIdentity: String?
-) throws -> String {
-  guard isSecureFsUuidPartLeaf(leaf) || isSecureFsSafeLeaf(leaf) else {
-    throw secureFsError("The receive entry must be a .UUID.part leaf or a safe basename.")
+  expectedParentIdentity: String?,
+  expectedLeafIdentity: String
+) throws -> Bool {
+  let sourceIsPartial = isSecureFsUuidPartLeaf(leaf)
+  let destinationIsPartial = isSecureFsUuidPartLeaf(destinationLeaf)
+  // A UUID partial may be moved to a final leaf or restored from one, but the
+  // endpoints must not both be partials (or both be final leaves).
+  guard isSecureFsSafeLeaf(leaf), isSecureFsSafeLeaf(destinationLeaf),
+        sourceIsPartial != destinationIsPartial, leaf != destinationLeaf,
+        isSecureFsIdentity(expectedLeafIdentity) else {
+    throw secureFsError("Exactly one endpoint must be a UUID .part leaf; both leaves and the source identity must be valid.")
   }
   let parentFD = try secureOpenValidatedReceiveParent(
     root: root,
@@ -555,25 +590,52 @@ private func secureCreateReceiveEntry(
     expectedParentIdentity: expectedParentIdentity)
   defer { _ = close(parentFD) }
 
-  let flags = O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC
-  let entryFD = leaf.withCString { openat(parentFD, $0, flags, mode_t(0o600)) }
-  guard entryFD >= 0 else {
+  let flags = O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC
+  let sourceFD = leaf.withCString { openat(parentFD, $0, flags) }
+  guard sourceFD >= 0 else {
     let code = errno
-    throw secureFsPosixError("create receive entry", code: code)
+    throw secureFsPosixError("open receive source for no-replace move", code: code)
   }
-  defer { _ = close(entryFD) }
-  var entryStat = stat()
-  guard fstat(entryFD, &entryStat) == 0 else {
+  defer { _ = close(sourceFD) }
+
+  var openedStat = stat()
+  guard fstat(sourceFD, &openedStat) == 0 else {
     let code = errno
-    throw secureFsPosixError("inspect created receive entry", code: code)
+    throw secureFsPosixError("inspect receive source for move", code: code)
   }
-  guard (entryStat.st_mode & S_IFMT) == S_IFREG else {
-    throw secureFsError("The created receive entry is not a regular file.")
+  guard (openedStat.st_mode & S_IFMT) == S_IFREG,
+        openedStat.st_uid == geteuid(),
+        openedStat.st_nlink == 1,
+        (openedStat.st_mode & mode_t(0o7777)) == mode_t(0o600),
+        secureFsEntryIdentity(openedStat) == expectedLeafIdentity else {
+    throw secureFsError("The receive source is not the expected private regular file.")
   }
-  return secureFsEntryIdentity(entryStat)
+
+  // Check the source name as late as possible before the move. A same-UID race
+  // after this check is accepted; exclusive rename still protects the destination.
+  var namedStat = stat()
+  let namedStatResult = leaf.withCString {
+    fstatat(parentFD, $0, &namedStat, AT_SYMLINK_NOFOLLOW)
+  }
+  guard namedStatResult == 0 else {
+    let code = errno
+    throw secureFsPosixError("verify receive source before move", code: code)
+  }
+  guard (namedStat.st_mode & S_IFMT) == S_IFREG,
+        secureFsEntryIdentity(namedStat) == secureFsEntryIdentity(openedStat),
+        secureFsEntryIdentity(namedStat) == expectedLeafIdentity else {
+    throw secureFsError("The receive source name changed before the move.")
+  }
+
+  let renameResult = secureRenameReceiveNoReplace(
+    fromFD: parentFD, fromLeaf: leaf, toFD: parentFD, toLeaf: destinationLeaf)
+  if renameResult == 0 { return true }
+  let code = errno
+  if code == EEXIST { return false }
+  throw secureFsPosixError("move receive entry without replacement", code: code)
 }
 
-private func secureCaptureReceiveEntryIdentity(
+private func secureCreateReceiveEntry(
   root: String,
   relativeParent: String,
   leaf: String,
@@ -581,7 +643,148 @@ private func secureCaptureReceiveEntryIdentity(
   expectedParentIdentity: String?
 ) throws -> String {
   guard isSecureFsUuidPartLeaf(leaf) else {
-    throw secureFsError("The receive entry must be a .UUID.part leaf.")
+    throw secureFsError("The receive partial must be a .UUID.part leaf.")
+  }
+  let parentFD = try secureOpenValidatedReceiveParent(
+    root: root,
+    relativeParent: relativeParent,
+    expectedRootIdentity: expectedRootIdentity,
+    expectedParentIdentity: expectedParentIdentity)
+  defer { _ = close(parentFD) }
+
+  var parentStat = stat()
+  guard fstat(parentFD, &parentStat) == 0 else {
+    let code = errno
+    throw secureFsPosixError("inspect receive parent for private staging", code: code)
+  }
+
+  // Create the entry in an empty staging directory, remove inherited ACLs there,
+  // then atomically publish it. This avoids exposing a newly created file during
+  // the post-create ACL update window in a user-selected directory.
+  let stagingDirectory = ".landrop-stage-\(UUID().uuidString)"
+  let mkdirResult = stagingDirectory.withCString {
+    mkdirat(parentFD, $0, mode_t(0o700))
+  }
+  guard mkdirResult == 0 else {
+    let code = errno
+    throw secureFsPosixError("create private receive staging directory", code: code)
+  }
+  var createdStagingStat = stat()
+  let createdStagingStatResult = stagingDirectory.withCString {
+    fstatat(parentFD, $0, &createdStagingStat, AT_SYMLINK_NOFOLLOW)
+  }
+  guard createdStagingStatResult == 0 else {
+    let code = errno
+    throw secureFsPosixError("inspect created receive staging directory", code: code)
+  }
+  guard (createdStagingStat.st_mode & S_IFMT) == S_IFDIR,
+        createdStagingStat.st_uid == geteuid(),
+        createdStagingStat.st_dev == parentStat.st_dev else {
+    throw secureFsError("The created receive staging directory is not owned by this user on the parent volume.")
+  }
+  let createdStagingIdentity = secureFsEntryIdentity(createdStagingStat)
+
+  let directoryFlags = O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC
+  let stagingLeaf = ".landrop-receive-\(UUID().uuidString)"
+  var stagingFD: Int32 = -1
+  var stagingFDIsTrusted = false
+  var entryPublished = false
+  defer {
+    if stagingFD >= 0 {
+      if !entryPublished && stagingFDIsTrusted {
+        _ = stagingLeaf.withCString { unlinkat(stagingFD, $0, 0) }
+      }
+      _ = close(stagingFD)
+    }
+    var currentStagingStat = stat()
+    let currentStagingStatResult = stagingDirectory.withCString {
+      fstatat(parentFD, $0, &currentStagingStat, AT_SYMLINK_NOFOLLOW)
+    }
+    if currentStagingStatResult == 0,
+       (currentStagingStat.st_mode & S_IFMT) == S_IFDIR,
+       currentStagingStat.st_uid == geteuid(),
+       currentStagingStat.st_dev == parentStat.st_dev,
+       secureFsEntryIdentity(currentStagingStat) == createdStagingIdentity {
+      _ = stagingDirectory.withCString { unlinkat(parentFD, $0, AT_REMOVEDIR) }
+    }
+  }
+  stagingFD = stagingDirectory.withCString { openat(parentFD, $0, directoryFlags) }
+  guard stagingFD >= 0 else {
+    let code = errno
+    throw secureFsPosixError("open private receive staging directory", code: code)
+  }
+
+  var stagingStat = stat()
+  guard fstat(stagingFD, &stagingStat) == 0 else {
+    let code = errno
+    throw secureFsPosixError("inspect private receive staging directory", code: code)
+  }
+  guard (stagingStat.st_mode & S_IFMT) == S_IFDIR,
+        stagingStat.st_uid == geteuid(), stagingStat.st_dev == parentStat.st_dev,
+        secureFsEntryIdentity(stagingStat) == createdStagingIdentity else {
+    throw secureFsError("The private receive staging directory is not owned by this user on the parent volume.")
+  }
+  stagingFDIsTrusted = true
+  guard fchmod(stagingFD, mode_t(0o700)) == 0 else {
+    let code = errno
+    throw secureFsPosixError("secure private receive staging directory mode", code: code)
+  }
+  try secureClearExtendedAcl(stagingFD, operation: "secure private receive staging directory ACL")
+  guard try secureReceiveDirectoryIsEmpty(stagingFD) else {
+    throw secureFsError("The private receive staging directory is not empty.")
+  }
+
+  let flags = O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC
+  let entryFD = stagingLeaf.withCString {
+    openat(stagingFD, $0, flags, mode_t(0o600))
+  }
+  guard entryFD >= 0 else {
+    let code = errno
+    throw secureFsPosixError("create staged receive entry", code: code)
+  }
+  defer { _ = close(entryFD) }
+  try secureClearExtendedAcl(entryFD, operation: "secure receive entry ACL")
+
+  var entryStat = stat()
+  guard fstat(entryFD, &entryStat) == 0 else {
+    let code = errno
+    throw secureFsPosixError("inspect staged receive entry", code: code)
+  }
+  guard (entryStat.st_mode & S_IFMT) == S_IFREG,
+        entryStat.st_uid == geteuid(),
+        entryStat.st_nlink == 1,
+        (entryStat.st_mode & mode_t(0o7777)) == mode_t(0o600) else {
+    throw secureFsError("The staged receive entry is not a private regular file.")
+  }
+  let entryIdentity = secureFsEntryIdentity(entryStat)
+
+  let renameResult = stagingLeaf.withCString { source in
+    leaf.withCString { destination in
+      renameatx_np(stagingFD, source, parentFD, destination, UInt32(RENAME_EXCL))
+    }
+  }
+  guard renameResult == 0 else {
+    let code = errno
+    throw secureFsPosixError("publish private receive entry", code: code)
+  }
+  entryPublished = true
+
+  // The immediately following identity-pinned capture verifies the published
+  // name before any caller can write; avoid losing the known pin on a late
+  // path-stat failure after the atomic publication commit point.
+  return entryIdentity
+}
+
+private func secureCaptureReceiveEntryIdentity(
+  root: String,
+  relativeParent: String,
+  leaf: String,
+  expectedRootIdentity: String,
+  expectedParentIdentity: String?,
+  expectedLeafIdentity: String
+) throws -> String {
+  guard isSecureFsUuidPartLeaf(leaf), isSecureFsIdentity(expectedLeafIdentity) else {
+    throw secureFsError("The receive entry and its expected identity must be valid.")
   }
   let parentFD = try secureOpenValidatedReceiveParent(
     root: root,
@@ -602,10 +805,52 @@ private func secureCaptureReceiveEntryIdentity(
     let code = errno
     throw secureFsPosixError("inspect receive entry", code: code)
   }
-  guard (entryStat.st_mode & S_IFMT) == S_IFREG else {
-    throw secureFsError("Only a regular receive entry has an identity.")
+  guard (entryStat.st_mode & S_IFMT) == S_IFREG,
+        entryStat.st_uid == geteuid(),
+        entryStat.st_nlink == 1 else {
+    throw secureFsError("Only an owned regular receive entry can be resumed.")
   }
-  return secureFsEntryIdentity(entryStat)
+  let entryIdentity = secureFsEntryIdentity(entryStat)
+  guard entryIdentity == expectedLeafIdentity else {
+    throw secureFsError("The receive entry identity changed before ACL repair.")
+  }
+  if (entryStat.st_mode & mode_t(0o7777)) != mode_t(0o600) {
+    guard fchmod(entryFD, mode_t(0o600)) == 0 else {
+      let code = errno
+      throw secureFsPosixError("secure resumed receive entry mode", code: code)
+    }
+  }
+  if try secureHasExtendedAcl(entryFD, operation: "inspect resumed receive entry ACL") {
+    try secureClearExtendedAcl(entryFD, operation: "secure resumed receive entry ACL")
+  }
+  var securedStat = stat()
+  guard fstat(entryFD, &securedStat) == 0 else {
+    let code = errno
+    throw secureFsPosixError("verify secured receive entry", code: code)
+  }
+  guard (securedStat.st_mode & S_IFMT) == S_IFREG,
+        securedStat.st_uid == geteuid(),
+        securedStat.st_nlink == 1,
+        (securedStat.st_mode & mode_t(0o7777)) == mode_t(0o600),
+        secureFsEntryIdentity(securedStat) == entryIdentity else {
+    throw secureFsError("The resumed receive entry changed while its permissions were secured.")
+  }
+  var linkedStat = stat()
+  let linkedStatResult = leaf.withCString {
+    fstatat(parentFD, $0, &linkedStat, AT_SYMLINK_NOFOLLOW)
+  }
+  guard linkedStatResult == 0 else {
+    let code = errno
+    throw secureFsPosixError("verify resumed receive entry path", code: code)
+  }
+  guard (linkedStat.st_mode & S_IFMT) == S_IFREG,
+        linkedStat.st_uid == geteuid(),
+        linkedStat.st_nlink == 1,
+        secureFsEntryIdentity(linkedStat) == entryIdentity,
+        secureFsEntryIdentity(linkedStat) == expectedLeafIdentity else {
+    throw secureFsError("The receive entry path changed while it was being resumed.")
+  }
+  return entryIdentity
 }
 
 private func secureUnlinkReceiveEntry(
@@ -828,6 +1073,7 @@ private func secureRemoveReceiveQuarantine(
         (quarantineRootStat.st_mode & mode_t(0o7777)) == mode_t(0o700) else {
     throw secureFsError("The receive quarantine root is not private and valid.")
   }
+  try secureClearExtendedAcl(quarantineRootFD, operation: "secure receive quarantine root ACL")
 
   let sessionFD = sessionId.withCString { openat(quarantineRootFD, $0, directoryFlags) }
   guard sessionFD >= 0 else {
@@ -847,6 +1093,7 @@ private func secureRemoveReceiveQuarantine(
         secureFsEntryIdentity(sessionStat) == expectedQuarantineIdentity else {
     throw secureFsError("The receive quarantine session identity or permissions changed.")
   }
+  try secureClearExtendedAcl(sessionFD, operation: "secure receive quarantine session ACL")
   guard try secureReceiveDirectoryIsEmpty(sessionFD) else {
     throw secureFsError("The receive quarantine session is not empty.")
   }
@@ -1471,6 +1718,7 @@ class MainFlutterWindow: NSWindow, NSWindowDelegate, NSDraggingDestination {
 
       guard call.method == "captureReceiveDirectoryIdentity" ||
             call.method == "createReceiveEntry" ||
+            call.method == "publishReceiveEntry" ||
             call.method == "captureReceiveEntryIdentity" ||
             call.method == "prepareReceiveQuarantine" ||
             call.method == "unlinkReceiveEntry" else {
@@ -1517,6 +1765,17 @@ class MainFlutterWindow: NSWindow, NSWindowDelegate, NSDraggingDestination {
           details: nil))
         return
       }
+      let destinationLeaf: String?
+      if call.method == "publishReceiveEntry" {
+        guard let value = arguments["destinationLeaf"] as? String else {
+          result(FlutterError(
+            code: "invalid_arguments", message: "Expected destinationLeaf string.", details: nil))
+          return
+        }
+        destinationLeaf = value
+      } else {
+        destinationLeaf = nil
+      }
       let parentIdentityValue = arguments["expectedParentIdentity"]
       guard parentIdentityValue is NSNull || parentIdentityValue is String else {
         result(FlutterError(
@@ -1536,7 +1795,9 @@ class MainFlutterWindow: NSWindow, NSWindowDelegate, NSDraggingDestination {
       let quarantineLeaf: String?
       let quarantineSessionId: String?
       let expectedQuarantineIdentity: String?
-      if call.method == "unlinkReceiveEntry" || call.method == "prepareReceiveQuarantine" {
+      if call.method == "captureReceiveEntryIdentity" ||
+         call.method == "unlinkReceiveEntry" || call.method == "prepareReceiveQuarantine" ||
+         call.method == "publishReceiveEntry" {
         guard let identity = arguments["expectedLeafIdentity"] as? String else {
           result(FlutterError(
             code: "invalid_arguments",
@@ -1589,6 +1850,19 @@ class MainFlutterWindow: NSWindow, NSWindowDelegate, NSDraggingDestination {
       DispatchQueue.global(qos: .utility).async {
         do {
           switch call.method {
+          case "publishReceiveEntry":
+            guard let expectedLeafIdentity, let destinationLeaf else {
+              throw secureFsError("A valid expected leaf identity and destination leaf are required.")
+            }
+            let moved = try securePublishReceiveEntry(
+              root: root,
+              relativeParent: relativeParent,
+              leaf: leaf,
+              destinationLeaf: destinationLeaf,
+              expectedRootIdentity: expectedRootIdentity,
+              expectedParentIdentity: expectedParentIdentity,
+              expectedLeafIdentity: expectedLeafIdentity)
+            DispatchQueue.main.async { result(moved) }
           case "createReceiveEntry":
             let identity = try secureCreateReceiveEntry(
               root: root,
@@ -1598,12 +1872,16 @@ class MainFlutterWindow: NSWindow, NSWindowDelegate, NSDraggingDestination {
               expectedParentIdentity: expectedParentIdentity)
             DispatchQueue.main.async { result(["leafIdentity": identity]) }
           case "captureReceiveEntryIdentity":
+            guard let expectedLeafIdentity else {
+              throw secureFsError("An expected leaf identity is required to capture a receive entry.")
+            }
             let identity = try secureCaptureReceiveEntryIdentity(
               root: root,
               relativeParent: relativeParent,
               leaf: leaf,
               expectedRootIdentity: expectedRootIdentity,
-              expectedParentIdentity: expectedParentIdentity)
+              expectedParentIdentity: expectedParentIdentity,
+              expectedLeafIdentity: expectedLeafIdentity)
             DispatchQueue.main.async { result(["leafIdentity": identity]) }
           case "prepareReceiveQuarantine":
             guard let expectedLeafIdentity, let quarantineSessionId, let quarantineLeaf else {

@@ -91,6 +91,14 @@ jobs:
         env:
           TMPDIR: ${{ runner.temp }}
         run: bash tool/package_macos.sh
+      - name: Test Windows receive-file ACL privacy
+        if: matrix.target == 'windows'
+        shell: pwsh
+        run: |
+          cmake --build build/windows/x64 --config Release --target secure_fs_acl_test
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & build/windows/x64/secure_fs_acl_test/secure_fs_acl_test.exe
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Package Windows application
         if: matrix.target == 'windows'
         shell: pwsh

@@ -48,8 +48,7 @@ class ManagedFileChunk {
 /// same no-follow native handle that passed the identity check; each later
 /// chunk reopens and rechecks the leaf. This does not prevent same-UID in-place
 /// content mutation. Direct POSIX unlink callers still have a check-then-unlink
-/// race; quarantine does not isolate against hostile same-UID processes. Managed-file read chunks come from the same native handle checked
-/// for identity, and each later chunk reopens and rechecks the leaf.
+/// race; quarantine does not isolate against hostile same-UID processes.
 /// Paths are passed as root + constrained components, never as mutable
 /// absolute target paths.
 class SecureReceiveFile {
@@ -60,6 +59,8 @@ class SecureReceiveFile {
   static const int managedFileReadChunkLimit = 1024 * 1024;
   static final RegExp _uuidPattern =
       RegExp(r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$');
+  static final RegExp _receivePartPattern = RegExp(
+      r'^\.[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.part$');
 
   static Future<ReceiveDirectoryIdentity> captureDirectoryIdentity({
     required String root,
@@ -107,6 +108,10 @@ class SecureReceiveFile {
       !value.contains('\\') &&
       !value.contains('\u0000');
 
+  /// Creates an exclusive empty `.part` entry and returns its file identity.
+  ///
+  /// Receive partials must be passed to [captureReceiveEntryIdentity] before
+  /// writing; that verifies the pin and normalizes permissions when required.
   static Future<ReceiveLeafIdentity> createReceiveEntry({
     required String root,
     required String relativeParent,
@@ -114,6 +119,10 @@ class SecureReceiveFile {
     required String expectedRootIdentity,
     required String? expectedParentIdentity,
   }) async {
+    if (!_receivePartPattern.hasMatch(leaf)) {
+      throw FileSystemException(
+          'Receive partial leaf must be .UUID.part', root);
+    }
     try {
       final result = await _channel.invokeMapMethod<String, Object?>(
           'createReceiveEntry', <String, Object?>{
@@ -135,13 +144,22 @@ class SecureReceiveFile {
     }
   }
 
+  /// Verifies the saved identity before normalizing permissions for resume.
+  ///
+  /// Native bridges may update mode or ACL bits on the existing inode. Never
+  /// call this for an unpinned leaf or adopt the returned identity as a pin.
   static Future<ReceiveLeafIdentity> captureReceiveEntryIdentity({
     required String root,
     required String relativeParent,
     required String leaf,
     required String expectedRootIdentity,
     required String? expectedParentIdentity,
+    required String expectedLeafIdentity,
   }) async {
+    if (!_isValidLeafIdentity(expectedLeafIdentity)) {
+      throw FileSystemException(
+          'Invalid expected receive entry identity', root);
+    }
     try {
       final result = await _channel.invokeMapMethod<String, Object?>(
           'captureReceiveEntryIdentity', <String, Object?>{
@@ -150,16 +168,68 @@ class SecureReceiveFile {
         'leaf': leaf,
         'expectedRootIdentity': expectedRootIdentity,
         'expectedParentIdentity': expectedParentIdentity,
+        'expectedLeafIdentity': expectedLeafIdentity,
       });
       final identity = result?['leafIdentity'];
       if (identity is! String || !_isValidLeafIdentity(identity)) {
         throw FileSystemException(
             'Native secure filesystem returned invalid leaf identity', root);
       }
+      if (identity != expectedLeafIdentity) {
+        throw FileSystemException(
+            'Receive entry identity changed during capture', root);
+      }
       return ReceiveLeafIdentity(identity);
     } on PlatformException catch (error) {
       throw FileSystemException(
           error.message ?? 'Could not identify receive entry', root);
+    }
+  }
+
+  /// Moves a pinned receive entry between its `.part` and final names.
+  ///
+  /// The allowed directions are `.part` to a safe basename for publication,
+  /// and a safe basename back to `.part` for transaction rollback. Exactly one
+  /// leaf must be a `.part`. Returns false only if the destination is occupied;
+  /// no platform may replace that occupant. POSIX backends revalidate the source
+  /// name just before path-based rename, which cannot be bound to the open
+  /// source handle.
+  static Future<bool> publishReceiveEntry({
+    required String root,
+    required String relativeParent,
+    required String leaf,
+    required String destinationLeaf,
+    required String expectedRootIdentity,
+    required String? expectedParentIdentity,
+    required String expectedLeafIdentity,
+  }) async {
+    final sourceIsPart = _receivePartPattern.hasMatch(leaf);
+    final destinationIsPart = _receivePartPattern.hasMatch(destinationLeaf);
+    if (sourceIsPart == destinationIsPart ||
+        !_isSafeLeaf(leaf) ||
+        !_isSafeLeaf(destinationLeaf) ||
+        !_isValidLeafIdentity(expectedLeafIdentity)) {
+      throw FileSystemException('Invalid receive move identity', root);
+    }
+    try {
+      final published = await _channel
+          .invokeMethod<bool>('publishReceiveEntry', <String, Object?>{
+        'root': root,
+        'relativeParent': relativeParent,
+        'leaf': leaf,
+        'destinationLeaf': destinationLeaf,
+        'expectedRootIdentity': expectedRootIdentity,
+        'expectedParentIdentity': expectedParentIdentity,
+        'expectedLeafIdentity': expectedLeafIdentity,
+      });
+      if (published == null) {
+        throw FileSystemException(
+            'Native secure filesystem returned no move result', root);
+      }
+      return published;
+    } on PlatformException catch (error) {
+      throw FileSystemException(
+          error.message ?? 'Could not safely move receive entry', root);
     }
   }
 

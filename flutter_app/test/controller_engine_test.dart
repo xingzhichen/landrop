@@ -4094,6 +4094,39 @@ void main() {
     expect(controller.activeZipJobsForTesting, 0);
   });
 
+  test('upload admitted before stop receives service unavailable', () async {
+    await controller.stop(page);
+    controller.dispose();
+    SharedPreferences.setMockInitialValues({});
+    final serveEntered = Completer<void>();
+    final releaseServe = Completer<void>();
+    controller = LanDropController(
+        receiveDirectory: directory,
+        beforeHttpServe: () async {
+          serveEntered.complete();
+          await releaseServe.future;
+        });
+    await controller.initialize();
+    page = await controller.createPage('Stopping upload');
+    await controller.start(page);
+    port = controller.portFor(page)!;
+
+    final pendingRequest =
+        request(port, 'POST', '/upload?name=stopping.txt', body: [1, 2, 3]);
+    await serveEntered.future.timeout(const Duration(seconds: 5));
+    final stopping = controller.stop(page);
+    try {
+      await until(() => controller.portFor(page) == null);
+      releaseServe.complete();
+      final reply = await pendingRequest;
+      expect(reply.status, HttpStatus.serviceUnavailable);
+      expect(reply.json['error'], contains('停止'));
+      await stopping;
+    } finally {
+      if (!releaseServe.isCompleted) releaseServe.complete();
+    }
+  });
+
   test('rejected HTTP responses have a separate concurrency budget', () async {
     await controller.stop(page);
     controller.dispose();
@@ -4403,9 +4436,46 @@ void main() {
         ZipDecoder().decodeBytes(zip.bytes, verify: true).files, hasLength(1));
   });
 
+  test(
+      'session completion retries with a suffix instead of replacing a late file',
+      () async {
+    final id = await create(size: 3, name: 'race.txt');
+    final partials = await Directory(directory.path)
+        .list(recursive: true, followLinks: false)
+        .where((entity) => p.basename(entity.path) == '.$id.part')
+        .toList();
+    expect(partials, hasLength(1));
+    final partial = partials.single as File;
+    final chunk =
+        await request(port, 'PATCH', '/uploads/$id?offset=0', body: [1, 2, 3]);
+    expect(chunk.status, 200);
+
+    final occupiedPath = p.join(partial.parent.path, 'race.txt');
+    injectNextReceivePublishCollisionForTest(
+        occupiedPath, 'preserve this occupant');
+    final completed = await request(port, 'POST', '/uploads/$id/complete');
+    expect(completed.status, 201);
+    expect(completed.json['name'], 'race (1).txt');
+    expect(await File(occupiedPath).readAsString(), 'preserve this occupant');
+    expect(
+        await File(p.join(partial.parent.path, 'race (1).txt')).readAsBytes(),
+        [1, 2, 3]);
+    expect(await partial.exists(), isFalse);
+  });
+
   test('failed receipt persistence rolls back received records across restart',
       () async {
-    final id = await create(size: 0);
+    final id = await create(size: 3);
+    final partials = await Directory(directory.path)
+        .list(recursive: true, followLinks: false)
+        .where((entity) => p.basename(entity.path) == '.$id.part')
+        .toList();
+    expect(partials, hasLength(1));
+    final partial = partials.single as File;
+    final chunk =
+        await request(port, 'PATCH', '/uploads/$id?offset=0', body: [1, 2, 3]);
+    expect(chunk.status, 200);
+    expect(await partial.readAsBytes(), [1, 2, 3]);
     controller.beforePersistKey = (key) async {
       if (key == 'landrop.uploadReceipts.v1') {
         throw const FileSystemException('injected receipt persistence failure');
@@ -4415,6 +4485,9 @@ void main() {
     final failed = await request(port, 'POST', '/uploads/$id/complete');
     expect(failed.status, 500);
     expect(controller.receivedFiles, isEmpty);
+    expect(await partial.exists(), isTrue);
+    expect(await partial.readAsBytes(), [1, 2, 3],
+        reason: 'rollback must restore the same resumable partial');
     final preferences = await SharedPreferences.getInstance();
     expect(jsonDecode(preferences.getString('landrop.received.v1') ?? '[]'),
         isEmpty,
@@ -4435,11 +4508,74 @@ void main() {
         reason: 'restart must not restore a record for the rolled-back file');
     final resumable = await request(port, 'GET', '/uploads/$id');
     expect(resumable.status, 200);
-    expect(resumable.json['offset'], 0);
+    expect(resumable.json['offset'], 3);
     final retry = await request(port, 'POST', '/uploads/$id/complete');
     expect(retry.status, 201);
     expect(controller.receivedFiles, hasLength(1));
-    expect(await File(controller.receivedFiles.single.path).exists(), isTrue);
+    expect(await File(controller.receivedFiles.single.path).readAsBytes(),
+        [1, 2, 3]);
+  });
+
+  test('lost session publish response restores the pinned partial', () async {
+    final id = await create(size: 3, name: 'lost-session.txt');
+    final partials = await Directory(directory.path)
+        .list(recursive: true, followLinks: false)
+        .where((entity) => p.basename(entity.path) == '.$id.part')
+        .toList();
+    expect(partials, hasLength(1));
+    final partial = partials.single as File;
+    final chunk =
+        await request(port, 'PATCH', '/uploads/$id?offset=0', body: [1, 2, 3]);
+    expect(chunk.status, 200);
+    failNextReceivePublishAfterMoveForTest(
+        p.join(partial.parent.path, 'lost-session.txt'));
+
+    final failed = await request(port, 'POST', '/uploads/$id/complete');
+    expect(failed.status, 500);
+    expect(await partial.readAsBytes(), [1, 2, 3]);
+    expect(await File(p.join(partial.parent.path, 'lost-session.txt')).exists(),
+        isFalse);
+    expect(controller.receivedFiles, isEmpty);
+    final resumable = await request(port, 'GET', '/uploads/$id');
+    expect(resumable.status, 200);
+    expect(resumable.json['offset'], 3);
+  });
+
+  test('failed session rollback preserves partial-path occupants and data',
+      () async {
+    final id = await create(size: 3, name: 'restore-failure.bin');
+    final partials = await Directory(directory.path)
+        .list(recursive: true, followLinks: false)
+        .where((entity) => p.basename(entity.path) == '.$id.part')
+        .toList();
+    expect(partials, hasLength(1));
+    final partial = partials.single as File;
+    final chunk =
+        await request(port, 'PATCH', '/uploads/$id?offset=0', body: [1, 2, 3]);
+    expect(chunk.status, 200);
+
+    var injected = false;
+    controller.beforePersistKey = (key) async {
+      if (!injected && key == 'landrop.uploadReceipts.v1') {
+        injected = true;
+        await partial.writeAsString('preserve this partial-path occupant');
+        replaceMockReceiveLeafIdentity(partial.path);
+        throw const FileSystemException('injected receipt persistence failure');
+      }
+    };
+
+    final failed = await request(port, 'POST', '/uploads/$id/complete');
+    expect(failed.status, 500);
+    expect(await partial.readAsString(), 'preserve this partial-path occupant');
+    expect(
+        await File(p.join(partial.parent.path, 'restore-failure.bin'))
+            .readAsBytes(),
+        [1, 2, 3],
+        reason: 'the published data must survive failed no-replace rollback');
+    expect(controller.receivedFiles, isEmpty);
+    expect(controller.pageRecoveryWarnings[page.id], isNotNull);
+    expect(controller.transfers.singleWhere((task) => task.id == id).status,
+        'failed');
   });
 
   test('lost complete response can be confirmed without a duplicate save',

@@ -1,4 +1,6 @@
 #include "secure_fs.h"
+#include "private_receive_entry.h"
+#include "private_receive_security.h"
 
 #include <windows.h>
 #include <winternl.h>
@@ -17,17 +19,24 @@
 namespace {
 
 constexpr ULONG kFileOpen = 1;
-constexpr ULONG kFileCreate = 2;
 constexpr ULONG kFileDirectoryFile = 0x00000001;
 constexpr ULONG kFileSynchronousIoNonalert = 0x00000020;
 constexpr ULONG kFileNonDirectoryFile = 0x00000040;
 constexpr ULONG kFileOpenReparsePoint = 0x00200000;
 constexpr ULONG kObjectCaseInsensitive = 0x00000040;
-// Parent and leaf handles intentionally deny concurrent write/delete opens:
-// rename, replacement, or reparse-point mutation must not race this walk.
+// Ancestor and leaf handles deny concurrent write/delete opens; this pins
+// path traversal and source identities against replacement while they are used.
 constexpr ULONG kPinnedShare = FILE_SHARE_READ;
 constexpr ACCESS_MASK kDirectoryAccess =
     FILE_LIST_DIRECTORY | FILE_TRAVERSE | FILE_READ_ATTRIBUTES | SYNCHRONIZE;
+// FileRenameInfo requires FILE_ADD_FILE on its RootDirectory. Request it only
+// for the final receive directory; ancestors are traversal handles only.
+constexpr ACCESS_MASK kReceiveTargetDirectoryAccess =
+    kDirectoryAccess | FILE_ADD_FILE;
+// Allow concurrent receive operations to add files while still preventing the
+// final directory itself from being renamed or removed under these handles.
+constexpr ULONG kReceiveTargetDirectoryShare =
+    kPinnedShare | FILE_SHARE_WRITE;
 constexpr ULONG kShareAll =
     FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE;
 // FILE_ID_INFO is the layout returned by FileIdInfo (class value 18).
@@ -162,6 +171,21 @@ bool IsSafeReceiveEntryName(const std::wstring& value) {
   return IsReceiveEntryLeaf(value) || IsSafePathComponent(value);
 }
 
+bool IsValidReceiveEntryMove(const std::wstring& source,
+                             const std::wstring& destination) {
+  const bool source_is_part = IsReceiveEntryLeaf(source);
+  const bool destination_is_part = IsReceiveEntryLeaf(destination);
+  if (source_is_part == destination_is_part ||
+      !IsSafeReceiveEntryName(source) ||
+      !IsSafeReceiveEntryName(destination)) {
+    return false;
+  }
+  const int comparison = ::CompareStringOrdinal(
+      source.c_str(), static_cast<int>(source.size()), destination.c_str(),
+      static_cast<int>(destination.size()), TRUE);
+  return comparison == CSTR_LESS_THAN || comparison == CSTR_GREATER_THAN;
+}
+
 bool SplitLocalDriveRootedPath(const std::wstring& path,
                                std::wstring* drive_root,
                                std::vector<std::wstring>* components,
@@ -245,7 +269,9 @@ NtCreateFileFunction GetNtCreateFile() {
 NTSTATUS OpenRelative(
     NtCreateFileFunction nt_create_file, HANDLE parent,
     const std::wstring& component, bool directory, HANDLE* output,
-    ACCESS_MASK leaf_access = DELETE | FILE_READ_ATTRIBUTES | SYNCHRONIZE) {
+    ACCESS_MASK leaf_access = DELETE | FILE_READ_ATTRIBUTES | SYNCHRONIZE,
+    ACCESS_MASK directory_access = kDirectoryAccess,
+    ULONG share_access = kPinnedShare) {
   if (!nt_create_file || component.empty() ||
       component.size() > std::numeric_limits<USHORT>::max() / sizeof(wchar_t)) {
     return static_cast<NTSTATUS>(0xC000000DL);  // STATUS_INVALID_PARAMETER
@@ -262,41 +288,29 @@ NTSTATUS OpenRelative(
   attributes.Attributes = kObjectCaseInsensitive;
 
   IO_STATUS_BLOCK io_status = {};
-  const ACCESS_MASK access = directory ? kDirectoryAccess : leaf_access;
+  const ACCESS_MASK access = directory ? directory_access : leaf_access;
   const ULONG options = kFileOpenReparsePoint | kFileSynchronousIoNonalert |
                         (directory ? kFileDirectoryFile
                                    : kFileNonDirectoryFile);
   return nt_create_file(output, access, &attributes, &io_status, nullptr,
-                        FILE_ATTRIBUTE_NORMAL, kPinnedShare, kFileOpen, options,
+                        FILE_ATTRIBUTE_NORMAL, share_access, kFileOpen, options,
                         nullptr, 0);
 }
 
-NTSTATUS CreateReceiveEntryRelative(NtCreateFileFunction nt_create_file,
-                                    HANDLE parent,
-                                    const std::wstring& component,
-                                    HANDLE* output) {
-  if (!nt_create_file || component.empty() ||
-      component.size() > std::numeric_limits<USHORT>::max() / sizeof(wchar_t)) {
-    return static_cast<NTSTATUS>(0xC000000DL);  // STATUS_INVALID_PARAMETER
+SecureFsResult CreateReceiveEntryRelative(HANDLE parent,
+                                          const std::wstring& component,
+                                          HANDLE* output) {
+  const landrop::ReceiveEntryCreateResult created =
+      landrop::CreatePrivateReceiveEntryRelative(parent, component, output);
+  switch (created.kind) {
+    case landrop::ReceiveEntryCreateKind::kSuccess:
+      return Success();
+    case landrop::ReceiveEntryCreateKind::kUnsafePath:
+      return UnsafePath();
+    case landrop::ReceiveEntryCreateKind::kIoFailure:
+      return IoFailure(created.error);
   }
-  UNICODE_STRING name = {};
-  name.Buffer = const_cast<PWSTR>(component.c_str());
-  name.Length = static_cast<USHORT>(component.size() * sizeof(wchar_t));
-  name.MaximumLength = name.Length;
-
-  OBJECT_ATTRIBUTES attributes = {};
-  attributes.Length = static_cast<ULONG>(sizeof(attributes));
-  attributes.RootDirectory = parent;
-  attributes.ObjectName = &name;
-  attributes.Attributes = kObjectCaseInsensitive;
-
-  IO_STATUS_BLOCK io_status = {};
-  const ULONG options = kFileOpenReparsePoint | kFileSynchronousIoNonalert |
-                        kFileNonDirectoryFile;
-  return nt_create_file(
-      output, DELETE | FILE_READ_ATTRIBUTES | FILE_WRITE_DATA | SYNCHRONIZE,
-      &attributes, &io_status, nullptr, FILE_ATTRIBUTE_NORMAL, kPinnedShare,
-      kFileCreate, options, nullptr, 0);
+  return IoFailure(ERROR_INVALID_DATA);
 }
 
 bool IsSafeDirectoryHandle(HANDLE handle, SecureFsResult* failure) {
@@ -385,11 +399,18 @@ SecureFsResult OpenReceiveDirectories(
   }
   NtCreateFileFunction nt_create_file = GetNtCreateFile();
   if (!nt_create_file) return IoFailure(ERROR_PROC_NOT_FOUND);
-  for (const std::wstring& component : root_components) {
+  for (size_t index = 0; index < root_components.size(); ++index) {
+    const std::wstring& component = root_components[index];
+    const bool is_target_directory = relative_parent.empty() &&
+                                     index + 1 == root_components.size();
+    const ACCESS_MASK directory_access =
+        is_target_directory ? kReceiveTargetDirectoryAccess : kDirectoryAccess;
     HANDLE child_raw = nullptr;
     const NTSTATUS status = OpenRelative(
         nt_create_file, directory_handles->back().get(), component, true,
-        &child_raw);
+        &child_raw, DELETE | FILE_READ_ATTRIBUTES | SYNCHRONIZE,
+        directory_access,
+        is_target_directory ? kReceiveTargetDirectoryShare : kPinnedShare);
     ScopedHandle child(child_raw);
     // A missing canonical root is not an idempotent unlink: Dart may have
     // validated another directory object which was moved or replaced.
@@ -411,7 +432,8 @@ SecureFsResult OpenReceiveDirectories(
     HANDLE date_raw = nullptr;
     const NTSTATUS status = OpenRelative(
         nt_create_file, directory_handles->back().get(), relative_parent, true,
-        &date_raw);
+        &date_raw, DELETE | FILE_READ_ATTRIBUTES | SYNCHRONIZE,
+        kReceiveTargetDirectoryAccess, kReceiveTargetDirectoryShare);
     ScopedHandle date_directory(date_raw);
     if (!IsStatusSuccess(status)) {
       return IoFailure(static_cast<DWORD>(status));
@@ -701,43 +723,6 @@ SecureFsResult CreateReceiveEntry(
     const std::wstring& leaf, const std::string& expected_root_identity,
     bool has_expected_parent_identity,
     const std::string& expected_parent_identity, std::string* leaf_identity) {
-  if (!IsSafeReceiveEntryName(leaf)) return UnsafePath();
-
-  std::vector<ScopedHandle> directory_handles;
-  const SecureFsResult opened = OpenVerifiedReceiveDirectories(
-      root, relative_parent, expected_root_identity,
-      has_expected_parent_identity, expected_parent_identity,
-      &directory_handles);
-  if (opened.kind != ResultKind::kSuccess) return opened;
-
-  NtCreateFileFunction nt_create_file = GetNtCreateFile();
-  if (!nt_create_file) return IoFailure(ERROR_PROC_NOT_FOUND);
-  HANDLE leaf_raw = nullptr;
-  const NTSTATUS leaf_status = CreateReceiveEntryRelative(
-      nt_create_file, directory_handles.back().get(), leaf, &leaf_raw);
-  ScopedHandle file(leaf_raw);
-  if (!IsStatusSuccess(leaf_status)) {
-    if (leaf_status == kStatusFileIsADirectory ||
-        leaf_status == kStatusNotADirectory) {
-      return UnsafePath();
-    }
-    return IoFailure(static_cast<DWORD>(leaf_status));
-  }
-  if (!file.valid()) return IoFailure(ERROR_INVALID_HANDLE);
-
-  SecureFsResult handle_failure = UnsafePath();
-  if (!IsRegularLeafHandle(file.get(), &handle_failure)) return handle_failure;
-  if (!ReadHandleIdentity(file.get(), leaf_identity, &handle_failure)) {
-    return handle_failure;
-  }
-  return Success();
-}
-
-SecureFsResult CaptureReceiveEntryIdentity(
-    const std::wstring& root, const std::wstring& relative_parent,
-    const std::wstring& leaf, const std::string& expected_root_identity,
-    bool has_expected_parent_identity,
-    const std::string& expected_parent_identity, std::string* leaf_identity) {
   if (!IsReceiveEntryLeaf(leaf)) return UnsafePath();
 
   std::vector<ScopedHandle> directory_handles;
@@ -747,11 +732,58 @@ SecureFsResult CaptureReceiveEntryIdentity(
       &directory_handles);
   if (opened.kind != ResultKind::kSuccess) return opened;
 
+  HANDLE leaf_raw = nullptr;
+  const SecureFsResult created = CreateReceiveEntryRelative(
+      directory_handles.back().get(), leaf, &leaf_raw);
+  if (created.kind != ResultKind::kSuccess) return created;
+  ScopedHandle file(leaf_raw);
+  if (!file.valid()) return IoFailure(ERROR_INVALID_HANDLE);
+
+  const auto rollback_created_handle = [&file](
+                                         const SecureFsResult& failure) {
+    FILE_DISPOSITION_INFO disposition = {};
+    disposition.DeleteFile = TRUE;
+    if (!::SetFileInformationByHandle(
+            file.get(), FileDispositionInfo, &disposition,
+            static_cast<DWORD>(sizeof(disposition)))) {
+      return IoFailure(::GetLastError());
+    }
+    return failure;
+  };
+
+  SecureFsResult handle_failure = UnsafePath();
+  if (!IsRegularLeafHandle(file.get(), &handle_failure)) {
+    return rollback_created_handle(handle_failure);
+  }
+  if (!ReadHandleIdentity(file.get(), leaf_identity, &handle_failure)) {
+    return rollback_created_handle(handle_failure);
+  }
+  return Success();
+}
+
+SecureFsResult CaptureReceiveEntryIdentity(
+    const std::wstring& root, const std::wstring& relative_parent,
+    const std::wstring& leaf, const std::string& expected_root_identity,
+    bool has_expected_parent_identity,
+    const std::string& expected_parent_identity,
+    const std::string& expected_leaf_identity, std::string* leaf_identity) {
+  if (!IsReceiveEntryLeaf(leaf) || leaf_identity == nullptr) return UnsafePath();
+
+  std::vector<ScopedHandle> directory_handles;
+  const SecureFsResult opened = OpenVerifiedReceiveDirectories(
+      root, relative_parent, expected_root_identity,
+      has_expected_parent_identity, expected_parent_identity,
+      &directory_handles);
+  if (opened.kind != ResultKind::kSuccess) return opened;
+
   NtCreateFileFunction nt_create_file = GetNtCreateFile();
   if (!nt_create_file) return IoFailure(ERROR_PROC_NOT_FOUND);
   HANDLE leaf_raw = nullptr;
+  constexpr ACCESS_MASK kReceiveEntryRepairAccess =
+      FILE_READ_ATTRIBUTES | READ_CONTROL | WRITE_DAC | SYNCHRONIZE;
   const NTSTATUS leaf_status = OpenRelative(
-      nt_create_file, directory_handles.back().get(), leaf, false, &leaf_raw);
+      nt_create_file, directory_handles.back().get(), leaf, false, &leaf_raw,
+      kReceiveEntryRepairAccess);
   ScopedHandle file(leaf_raw);
   if (!IsStatusSuccess(leaf_status)) {
     if (leaf_status == kStatusFileIsADirectory ||
@@ -764,9 +796,109 @@ SecureFsResult CaptureReceiveEntryIdentity(
 
   SecureFsResult handle_failure = UnsafePath();
   if (!IsRegularLeafHandle(file.get(), &handle_failure)) return handle_failure;
+  BY_HANDLE_FILE_INFORMATION opened_information = {};
+  if (!::GetFileInformationByHandle(file.get(), &opened_information)) {
+    return IoFailure(::GetLastError());
+  }
+  if (opened_information.nNumberOfLinks != 1) return UnsafePath();
+  std::string opened_identity;
+  if (!ReadHandleIdentity(file.get(), &opened_identity, &handle_failure)) {
+    return handle_failure;
+  }
+  if (opened_identity != expected_leaf_identity) return UnsafePath();
+
+  const DWORD security_error = landrop::EnsurePrivateReceiveFileDacl(file.get());
+  if (security_error != ERROR_SUCCESS) return IoFailure(security_error);
+
+  BY_HANDLE_FILE_INFORMATION secured_information = {};
+  if (!::GetFileInformationByHandle(file.get(), &secured_information)) {
+    return IoFailure(::GetLastError());
+  }
+  if (secured_information.nNumberOfLinks != 1) return UnsafePath();
   if (!ReadHandleIdentity(file.get(), leaf_identity, &handle_failure)) {
     return handle_failure;
   }
+  if (*leaf_identity != expected_leaf_identity) return UnsafePath();
+  return Success();
+}
+
+SecureFsResult PublishReceiveEntry(
+    const std::wstring& root, const std::wstring& relative_parent,
+    const std::wstring& source_leaf, const std::wstring& destination_leaf,
+    const std::string& expected_root_identity,
+    bool has_expected_parent_identity,
+    const std::string& expected_parent_identity,
+    const std::string& expected_leaf_identity, bool* moved) {
+  if (!IsValidReceiveEntryMove(source_leaf, destination_leaf) ||
+      moved == nullptr) {
+    return UnsafePath();
+  }
+
+  std::vector<ScopedHandle> directory_handles;
+  const SecureFsResult opened = OpenVerifiedReceiveDirectories(
+      root, relative_parent, expected_root_identity,
+      has_expected_parent_identity, expected_parent_identity,
+      &directory_handles);
+  if (opened.kind != ResultKind::kSuccess) return opened;
+
+  NtCreateFileFunction nt_create_file = GetNtCreateFile();
+  if (!nt_create_file) return IoFailure(ERROR_PROC_NOT_FOUND);
+  HANDLE source_raw = nullptr;
+  const NTSTATUS source_status = OpenRelative(
+      nt_create_file, directory_handles.back().get(), source_leaf, false,
+      &source_raw, DELETE | FILE_READ_ATTRIBUTES | SYNCHRONIZE);
+  ScopedHandle source(source_raw);
+  if (!IsStatusSuccess(source_status)) {
+    if (source_status == kStatusFileIsADirectory ||
+        source_status == kStatusNotADirectory) {
+      return UnsafePath();
+    }
+    return IoFailure(static_cast<DWORD>(source_status));
+  }
+  if (!source.valid()) return IoFailure(ERROR_INVALID_HANDLE);
+
+  SecureFsResult handle_failure = UnsafePath();
+  if (!IsRegularLeafHandle(source.get(), &handle_failure)) {
+    return handle_failure;
+  }
+  BY_HANDLE_FILE_INFORMATION source_information = {};
+  if (!::GetFileInformationByHandle(source.get(), &source_information)) {
+    return IoFailure(::GetLastError());
+  }
+  if (source_information.nNumberOfLinks != 1) return UnsafePath();
+  std::string source_identity;
+  if (!ReadHandleIdentity(source.get(), &source_identity, &handle_failure)) {
+    return handle_failure;
+  }
+  if (source_identity != expected_leaf_identity) return UnsafePath();
+
+  const size_t file_name_bytes = destination_leaf.size() * sizeof(wchar_t);
+  const size_t rename_info_bytes = sizeof(FILE_RENAME_INFO) + file_name_bytes;
+  if (file_name_bytes > std::numeric_limits<DWORD>::max() ||
+      rename_info_bytes > std::numeric_limits<DWORD>::max()) {
+    return IoFailure(ERROR_FILENAME_EXCED_RANGE);
+  }
+  std::vector<std::uint8_t> rename_buffer(rename_info_bytes, 0);
+  auto* rename_info =
+      reinterpret_cast<FILE_RENAME_INFO*>(rename_buffer.data());
+  rename_info->ReplaceIfExists = FALSE;
+  rename_info->RootDirectory = directory_handles.back().get();
+  rename_info->FileNameLength = static_cast<DWORD>(file_name_bytes);
+  std::copy(destination_leaf.begin(), destination_leaf.end(),
+            rename_info->FileName);
+
+  if (!::SetFileInformationByHandle(
+          source.get(), FileRenameInfo, rename_info,
+          static_cast<DWORD>(rename_info_bytes))) {
+    const DWORD error = ::GetLastError();
+    if (error == ERROR_ALREADY_EXISTS || error == ERROR_FILE_EXISTS) {
+      *moved = false;
+      return Success();
+    }
+    return IoFailure(error);
+  }
+  // The rename has committed; do not perform any operation that could fail.
+  *moved = true;
   return Success();
 }
 
@@ -885,6 +1017,7 @@ struct ReceiveEntryIdentityWork {
   std::string expected_root_identity;
   bool has_expected_parent_identity = false;
   std::string expected_parent_identity;
+  std::string expected_leaf_identity;
   bool create = false;
   std::unique_ptr<SecureFsMethodResult> result;
 };
@@ -893,6 +1026,18 @@ struct UnlinkEntryWork {
   std::wstring root;
   std::wstring relative_parent;
   std::wstring leaf;
+  std::string expected_root_identity;
+  bool has_expected_parent_identity = false;
+  std::string expected_parent_identity;
+  std::string expected_leaf_identity;
+  std::unique_ptr<SecureFsMethodResult> result;
+};
+
+struct PublishReceiveEntryWork {
+  std::wstring root;
+  std::wstring relative_parent;
+  std::wstring source_leaf;
+  std::wstring destination_leaf;
   std::string expected_root_identity;
   bool has_expected_parent_identity = false;
   std::string expected_parent_identity;
@@ -975,7 +1120,8 @@ DWORD WINAPI ReceiveEntryIdentityWorker(void* context) {
               work->root, work->relative_parent, work->leaf,
               work->expected_root_identity,
               work->has_expected_parent_identity,
-              work->expected_parent_identity, &leaf_identity);
+              work->expected_parent_identity, work->expected_leaf_identity,
+               &leaf_identity);
     if (operation.kind != ResultKind::kSuccess) {
       CompleteOperationError(operation, work->result.get());
       return 0;
@@ -1001,6 +1147,27 @@ DWORD WINAPI UnlinkEntryWorker(void* context) {
         work->expected_parent_identity, work->expected_leaf_identity);
     if (operation.kind == ResultKind::kSuccess) {
       work->result->Success();
+    } else {
+      CompleteOperationError(operation, work->result.get());
+    }
+  } catch (...) {
+    work->result->Error("io_error", "Secure file operation failed.");
+  }
+  return 0;
+}
+
+DWORD WINAPI PublishReceiveEntryWorker(void* context) {
+  std::unique_ptr<PublishReceiveEntryWork> work(
+      static_cast<PublishReceiveEntryWork*>(context));
+  try {
+    bool moved = false;
+    const SecureFsResult operation = PublishReceiveEntry(
+        work->root, work->relative_parent, work->source_leaf,
+        work->destination_leaf, work->expected_root_identity,
+        work->has_expected_parent_identity, work->expected_parent_identity,
+        work->expected_leaf_identity, &moved);
+    if (operation.kind == ResultKind::kSuccess) {
+      work->result->Success(flutter::EncodableValue(moved));
     } else {
       CompleteOperationError(operation, work->result.get());
     }
@@ -1120,10 +1287,11 @@ void HandleSecureFileSystemMethod(
   const bool create_entry = call.method_name() == "createReceiveEntry";
   const bool capture_entry =
       call.method_name() == "captureReceiveEntryIdentity";
+  const bool publish_entry = call.method_name() == "publishReceiveEntry";
   const bool unlink = call.method_name() == "unlinkReceiveEntry";
   if (!capture_managed && !capture_managed_leaf && !read_managed &&
       !unlink_managed && !capture && !create_entry && !capture_entry &&
-      !unlink) {
+      !publish_entry && !unlink) {
     result->NotImplemented();
     return;
   }
@@ -1287,11 +1455,84 @@ void HandleSecureFileSystemMethod(
     return;
   }
 
+  if (publish_entry) {
+    const std::string* source_utf8 =
+        arguments ? FindString(*arguments, "leaf") : nullptr;
+    const std::string* destination_utf8 =
+        arguments ? FindString(*arguments, "destinationLeaf") : nullptr;
+    const std::string* expected_root_identity =
+        arguments ? FindString(*arguments, "expectedRootIdentity") : nullptr;
+    const std::string* expected_leaf_identity =
+        arguments ? FindString(*arguments, "expectedLeafIdentity") : nullptr;
+    const flutter::EncodableValue* expected_parent_value =
+        arguments ? FindValue(*arguments, "expectedParentIdentity") : nullptr;
+    const std::string* expected_parent_identity = expected_parent_value
+        ? std::get_if<std::string>(expected_parent_value)
+        : nullptr;
+    const bool expected_parent_is_null =
+        expected_parent_value &&
+        std::holds_alternative<std::monostate>(*expected_parent_value);
+    if (!source_utf8 || !destination_utf8 || !expected_root_identity ||
+        !expected_leaf_identity ||
+        !IsCanonicalIdentityToken(*expected_root_identity) ||
+        !IsCanonicalIdentityToken(*expected_leaf_identity) ||
+        !expected_parent_value ||
+        (!expected_parent_identity && !expected_parent_is_null) ||
+        (expected_parent_identity &&
+         !IsCanonicalIdentityToken(*expected_parent_identity))) {
+      result->Error("invalid_arguments",
+                    "Expected source, destination, and identity arguments.");
+      return;
+    }
+
+    std::wstring source_leaf;
+    std::wstring destination_leaf;
+    if (!Utf8ToWide(*source_utf8, &source_leaf) ||
+        !Utf8ToWide(*destination_utf8, &destination_leaf) ||
+        !IsValidReceiveEntryMove(source_leaf, destination_leaf)) {
+      result->Error(
+          "invalid_arguments",
+          "Source and destination must be distinct safe leaves with exactly one .UUID.part entry.");
+      return;
+    }
+
+    PublishReceiveEntryWork* work = nullptr;
+    try {
+      work = new (std::nothrow) PublishReceiveEntryWork{
+          std::move(root),
+          std::move(relative_parent),
+          std::move(source_leaf),
+          std::move(destination_leaf),
+          *expected_root_identity,
+          expected_parent_identity != nullptr,
+          expected_parent_identity ? *expected_parent_identity : std::string(),
+          *expected_leaf_identity,
+          std::move(result)};
+    } catch (...) {
+      result->Error("io_error", "Could not start secure file operation.");
+      return;
+    }
+    if (!work) {
+      result->Error("io_error", "Could not start secure file operation.");
+      return;
+    }
+    if (!::QueueUserWorkItem(PublishReceiveEntryWorker, work,
+                             WT_EXECUTELONGFUNCTION)) {
+      std::unique_ptr<PublishReceiveEntryWork> failed_work(work);
+      failed_work->result->Error("io_error",
+                                 "Could not start secure file operation.");
+    }
+    return;
+  }
+
   if (create_entry || capture_entry) {
     const std::string* leaf_utf8 =
         arguments ? FindString(*arguments, "leaf") : nullptr;
     const std::string* expected_root_identity =
         arguments ? FindString(*arguments, "expectedRootIdentity") : nullptr;
+    const std::string* expected_leaf_identity = capture_entry
+        ? (arguments ? FindString(*arguments, "expectedLeafIdentity") : nullptr)
+        : nullptr;
     const flutter::EncodableValue* expected_parent_value =
         arguments ? FindValue(*arguments, "expectedParentIdentity") : nullptr;
     const std::string* expected_parent_identity = expected_parent_value
@@ -1302,6 +1543,9 @@ void HandleSecureFileSystemMethod(
         std::holds_alternative<std::monostate>(*expected_parent_value);
     if (!leaf_utf8 || !expected_root_identity ||
         !IsCanonicalIdentityToken(*expected_root_identity) ||
+        (capture_entry &&
+         (!expected_leaf_identity ||
+          !IsCanonicalIdentityToken(*expected_leaf_identity))) ||
         !expected_parent_value ||
         (!expected_parent_identity && !expected_parent_is_null) ||
         (expected_parent_identity &&
@@ -1312,14 +1556,9 @@ void HandleSecureFileSystemMethod(
     }
 
     std::wstring leaf;
-    if (!Utf8ToWide(*leaf_utf8, &leaf) ||
-        (create_entry ? !IsSafeReceiveEntryName(leaf)
-                      : !IsReceiveEntryLeaf(leaf))) {
+    if (!Utf8ToWide(*leaf_utf8, &leaf) || !IsReceiveEntryLeaf(leaf)) {
       result->Error(
-          "invalid_arguments",
-          create_entry
-              ? "Leaf must be a safe basename or .UUID.part receive entry."
-              : "Leaf must be a .UUID.part receive entry.");
+          "invalid_arguments", "Leaf must be a .UUID.part receive entry.");
       return;
     }
 
@@ -1332,7 +1571,8 @@ void HandleSecureFileSystemMethod(
           *expected_root_identity,
           expected_parent_identity != nullptr,
           expected_parent_identity ? *expected_parent_identity : std::string(),
-          create_entry,
+          expected_leaf_identity ? *expected_leaf_identity : std::string(),
+           create_entry,
           std::move(result)};
     } catch (...) {
       result->Error("io_error", "Could not start secure file operation.");

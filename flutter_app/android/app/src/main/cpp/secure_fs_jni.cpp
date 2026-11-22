@@ -1,6 +1,7 @@
 #include <jni.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cerrno>
 #include <climits>
 #include <dirent.h>
@@ -57,6 +58,29 @@ class ScopedFd {
   }
 
   int fd_;
+};
+
+class ScopedUnlinkAt {
+ public:
+  ScopedUnlinkAt(int directory_fd, std::string leaf)
+      : directory_fd_(directory_fd), leaf_(std::move(leaf)) {}
+  ~ScopedUnlinkAt() {
+    if (active_) {
+      const int saved_errno = errno;
+      (void)::unlinkat(directory_fd_, leaf_.c_str(), 0);
+      errno = saved_errno;
+    }
+  }
+
+  ScopedUnlinkAt(const ScopedUnlinkAt&) = delete;
+  ScopedUnlinkAt& operator=(const ScopedUnlinkAt&) = delete;
+
+  void release() { active_ = false; }
+
+ private:
+  int directory_fd_;
+  std::string leaf_;
+  bool active_ = true;
 };
 
 bool appendUtf8(JNIEnv* env, jstring value, std::string* output) {
@@ -369,11 +393,68 @@ int captureReceiveDirectoryIdentity(const std::string& root, const std::string& 
   return 0;
 }
 
+int ensureReceiveEntryStagingDirectory(int target_fd, ScopedFd* output) {
+  if (target_fd < 0 || output == nullptr) return EINVAL;
+  // Reserved, versioned namespace; never chmod an existing user directory.
+  static constexpr char kStagingDirectory[] = ".landrop-staging-v1";
+  bool created = false;
+  if (::mkdirat(target_fd, kStagingDirectory, 0700) == 0) {
+    created = true;
+  } else if (errno != EEXIST) {
+    return errno;
+  }
+  ScopedFd staging_fd(::openat(target_fd, kStagingDirectory,
+                               O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC));
+  if (!staging_fd.valid()) return errno;
+
+  struct stat target_stat {};
+  struct stat staging_stat {};
+  if (::fstat(target_fd, &target_stat) != 0 ||
+      ::fstat(staging_fd.get(), &staging_stat) != 0) {
+    return errno;
+  }
+  if (!S_ISDIR(staging_stat.st_mode) ||
+      staging_stat.st_uid != ::geteuid() ||
+      staging_stat.st_dev != target_stat.st_dev) {
+    return EACCES;
+  }
+  if (created) {
+    if (::fchmod(staging_fd.get(), 0700) != 0) return errno;
+  } else if ((staging_stat.st_mode & 07777) != 0700) {
+    // Never change permissions on a pre-existing user directory.
+    return EACCES;
+  }
+  if (::fstat(staging_fd.get(), &staging_stat) != 0) return errno;
+  if (staging_stat.st_uid != ::geteuid() ||
+      staging_stat.st_dev != target_stat.st_dev ||
+      (staging_stat.st_mode & 07777) != 0700) {
+    return EACCES;
+  }
+
+  struct stat linked_staging_stat {};
+  if (::fstatat(target_fd, kStagingDirectory, &linked_staging_stat,
+                AT_SYMLINK_NOFOLLOW) != 0) {
+    return errno;
+  }
+  if (!S_ISDIR(linked_staging_stat.st_mode) ||
+      linked_staging_stat.st_uid != ::geteuid() ||
+      linked_staging_stat.st_dev != staging_stat.st_dev ||
+      linked_staging_stat.st_ino != staging_stat.st_ino ||
+      (linked_staging_stat.st_mode & 07777) != 0700) {
+    return ESTALE;
+  }
+  *output = std::move(staging_fd);
+  return 0;
+}
+
+int renameNoReplace(int old_directory_fd, const char* old_leaf,
+                    int new_directory_fd, const char* new_leaf);
+
 int createReceiveEntry(const std::string& root, const std::string& relative_parent,
                        const std::string& leaf, const std::string& expected_root_identity,
                        const std::string* expected_parent_identity,
                        std::string* leaf_identity) {
-  if (!(isUuidPartLeaf(leaf) || isSafeLeaf(leaf)) || leaf_identity == nullptr) {
+  if (!isUuidPartLeaf(leaf) || leaf_identity == nullptr) {
     return EINVAL;
   }
 
@@ -384,23 +465,118 @@ int createReceiveEntry(const std::string& root, const std::string& relative_pare
       directories, expected_root_identity, expected_parent_identity);
   if (error_number != 0) return error_number;
 
-  ScopedFd entry_fd(::openat(directories.target_fd(), leaf.c_str(),
-                             O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC,
-                             0600));
-  if (!entry_fd.valid()) return errno;
-  if (::fchmod(entry_fd.get(), 0600) != 0) return errno;
+  ScopedFd staging_directory;
+  error_number = ensureReceiveEntryStagingDirectory(directories.target_fd(),
+                                                    &staging_directory);
+  if (error_number != 0) return error_number;
 
+  static std::atomic<uint64_t> staging_sequence{0};
+  std::string staging_leaf;
+  ScopedFd entry_fd;
+  for (int attempt = 0; attempt < 64; ++attempt) {
+    staging_leaf = "entry-" + std::to_string(::getpid()) + "-" +
+                   std::to_string(
+                       staging_sequence.fetch_add(1, std::memory_order_relaxed));
+    const int created_fd = ::openat(
+        staging_directory.get(), staging_leaf.c_str(),
+        O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600);
+    if (created_fd >= 0) {
+      entry_fd = ScopedFd(created_fd);
+      break;
+    }
+    if (errno != EEXIST) return errno;
+  }
+  if (!entry_fd.valid()) return EEXIST;
+  ScopedUnlinkAt remove_staged_entry(staging_directory.get(), staging_leaf);
+
+  if (::fchmod(entry_fd.get(), 0600) != 0) return errno;
   struct stat entry_stat {};
   if (::fstat(entry_fd.get(), &entry_stat) != 0) return errno;
-  if (!S_ISREG(entry_stat.st_mode)) return EINVAL;
+  if (!S_ISREG(entry_stat.st_mode) || entry_stat.st_uid != ::geteuid() ||
+      entry_stat.st_nlink != 1 || (entry_stat.st_mode & 07777) != 0600) {
+    return EACCES;
+  }
+  struct stat staged_path_stat {};
+  if (::fstatat(staging_directory.get(), staging_leaf.c_str(), &staged_path_stat,
+                AT_SYMLINK_NOFOLLOW) != 0) {
+    return errno;
+  }
+  if (!S_ISREG(staged_path_stat.st_mode) ||
+      staged_path_stat.st_uid != ::geteuid() || staged_path_stat.st_nlink != 1 ||
+      staged_path_stat.st_dev != entry_stat.st_dev ||
+      staged_path_stat.st_ino != entry_stat.st_ino ||
+      (staged_path_stat.st_mode & 07777) != 0600) {
+    return ESTALE;
+  }
+
   *leaf_identity = formatFileIdentity(entry_stat.st_dev, entry_stat.st_ino);
+  error_number = renameNoReplace(staging_directory.get(), staging_leaf.c_str(),
+                                 directories.target_fd(), leaf.c_str());
+  if (error_number != 0) return error_number;
+  remove_staged_entry.release();
   return 0;
+}
+
+int publishReceiveEntry(const std::string& root, const std::string& relative_parent,
+                        const std::string& leaf, const std::string& destination_leaf,
+                        const std::string& expected_root_identity,
+                        const std::string* expected_parent_identity,
+                        const std::string& expected_leaf_identity) {
+  const bool source_is_part = isUuidPartLeaf(leaf);
+  const bool destination_is_part = isUuidPartLeaf(destination_leaf);
+  if (!isSafeLeaf(leaf) || !isSafeLeaf(destination_leaf) || leaf == destination_leaf ||
+      source_is_part == destination_is_part ||
+      !isIdentityString(expected_leaf_identity) ||
+      !isIdentityString(expected_root_identity) ||
+      (relative_parent.empty()
+           ? expected_parent_identity != nullptr
+           : expected_parent_identity == nullptr ||
+                 !isIdentityString(*expected_parent_identity))) {
+    return EINVAL;
+  }
+
+  SecureFsDirectories directories;
+  int error_number = openReceiveDirectories(root, relative_parent, &directories);
+  if (error_number != 0) return error_number;
+  error_number = validateReceiveDirectoryIdentities(
+      directories, expected_root_identity, expected_parent_identity);
+  if (error_number != 0) return error_number;
+
+  // The identity belongs to the source path in either direction. Pin and validate the opened
+  // inode, then confirm that the named source still refers to that inode before renaming.
+  ScopedFd source_fd(::openat(directories.target_fd(), leaf.c_str(),
+                              O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC));
+  if (!source_fd.valid()) return errno;
+  struct stat source_stat {};
+  if (::fstat(source_fd.get(), &source_stat) != 0) return errno;
+  if (!S_ISREG(source_stat.st_mode) || source_stat.st_uid != ::geteuid()) return EACCES;
+  if (source_stat.st_nlink != 1) return EMLINK;
+  if ((source_stat.st_mode & 07777) != 0600) return EACCES;
+  if (!identityMatchesStat(expected_leaf_identity, source_stat)) return ESTALE;
+
+  struct stat linked_stat {};
+  if (::fstatat(directories.target_fd(), leaf.c_str(), &linked_stat,
+                AT_SYMLINK_NOFOLLOW) != 0) {
+    return errno;
+  }
+  if (!S_ISREG(linked_stat.st_mode) || linked_stat.st_uid != ::geteuid() ||
+      linked_stat.st_nlink != 1 || (linked_stat.st_mode & 07777) != 0600 ||
+      linked_stat.st_dev != source_stat.st_dev ||
+      linked_stat.st_ino != source_stat.st_ino ||
+      !identityMatchesStat(expected_leaf_identity, linked_stat)) {
+    return ESTALE;
+  }
+
+  // renameat2(RENAME_NOREPLACE) is the only supported move primitive; do not emulate it.
+  return renameNoReplace(directories.target_fd(), leaf.c_str(),
+                         directories.target_fd(), destination_leaf.c_str());
 }
 
 int captureReceiveEntryIdentity(const std::string& root, const std::string& relative_parent,
                                 const std::string& leaf,
                                 const std::string& expected_root_identity,
                                 const std::string* expected_parent_identity,
+                                const std::string& expected_leaf_identity,
                                 std::string* leaf_identity) {
   if (!isUuidPartLeaf(leaf) || leaf_identity == nullptr) return EINVAL;
 
@@ -417,8 +593,38 @@ int captureReceiveEntryIdentity(const std::string& root, const std::string& rela
   if (!entry_fd.valid()) return errno;
   struct stat entry_stat {};
   if (::fstat(entry_fd.get(), &entry_stat) != 0) return errno;
-  if (!S_ISREG(entry_stat.st_mode)) return EINVAL;
-  *leaf_identity = formatFileIdentity(entry_stat.st_dev, entry_stat.st_ino);
+  if (!S_ISREG(entry_stat.st_mode) || entry_stat.st_uid != ::geteuid()) {
+    return EACCES;
+  }
+  if (entry_stat.st_nlink != 1) return EMLINK;
+  const std::string opened_identity =
+      formatFileIdentity(entry_stat.st_dev, entry_stat.st_ino);
+  if (opened_identity != expected_leaf_identity) return ESTALE;
+
+  if ((entry_stat.st_mode & 07777) != 0600 &&
+      ::fchmod(entry_fd.get(), 0600) != 0) {
+    return errno;
+  }
+  struct stat secured_stat {};
+  if (::fstat(entry_fd.get(), &secured_stat) != 0) return errno;
+  if (!S_ISREG(secured_stat.st_mode) || secured_stat.st_uid != ::geteuid() ||
+      (secured_stat.st_mode & 07777) != 0600 || secured_stat.st_nlink != 1 ||
+      secured_stat.st_dev != entry_stat.st_dev ||
+      secured_stat.st_ino != entry_stat.st_ino) {
+    return EACCES;
+  }
+
+  struct stat linked_stat {};
+  if (::fstatat(directories.target_fd(), leaf.c_str(), &linked_stat,
+                AT_SYMLINK_NOFOLLOW) != 0) {
+    return errno;
+  }
+  if (!S_ISREG(linked_stat.st_mode) || linked_stat.st_uid != ::geteuid() ||
+      linked_stat.st_nlink != 1 || linked_stat.st_dev != secured_stat.st_dev ||
+      linked_stat.st_ino != secured_stat.st_ino) {
+    return ESTALE;
+  }
+  *leaf_identity = opened_identity;
   return 0;
 }
 
@@ -1124,21 +1330,61 @@ Java_com_xingzhichen_landrop_MainActivity_createReceiveEntryNative(
   }
 }
 
+extern "C" JNIEXPORT jint JNICALL
+Java_com_xingzhichen_landrop_MainActivity_publishReceiveEntryNative(
+    JNIEnv* env, jobject /* activity */, jstring root_value,
+    jstring relative_parent_value, jstring leaf_value,
+    jstring destination_leaf_value, jstring expected_root_identity_value,
+    jstring expected_parent_identity_value, jstring expected_leaf_identity_value) {
+  try {
+    std::string root;
+    std::string relative_parent;
+    std::string leaf;
+    std::string destination_leaf;
+    std::string expected_root_identity;
+    std::string expected_parent_identity;
+    std::string expected_leaf_identity;
+    if (!appendUtf8(env, root_value, &root) ||
+        !appendUtf8(env, relative_parent_value, &relative_parent) ||
+        !appendUtf8(env, leaf_value, &leaf) ||
+        !appendUtf8(env, destination_leaf_value, &destination_leaf) ||
+        !appendUtf8(env, expected_root_identity_value, &expected_root_identity) ||
+        !appendUtf8(env, expected_leaf_identity_value, &expected_leaf_identity)) {
+      return EINVAL;
+    }
+    const std::string* expected_parent_identity_pointer = nullptr;
+    if (expected_parent_identity_value != nullptr) {
+      if (!appendUtf8(env, expected_parent_identity_value, &expected_parent_identity)) {
+        return EINVAL;
+      }
+      expected_parent_identity_pointer = &expected_parent_identity;
+    }
+    return publishReceiveEntry(root, relative_parent, leaf, destination_leaf,
+                               expected_root_identity,
+                               expected_parent_identity_pointer,
+                               expected_leaf_identity);
+  } catch (...) {
+    return ENOMEM;
+  }
+}
+
 extern "C" JNIEXPORT jstring JNICALL
 Java_com_xingzhichen_landrop_MainActivity_captureReceiveEntryIdentityNative(
     JNIEnv* env, jobject /* activity */, jstring root_value, jstring relative_parent_value,
     jstring leaf_value, jstring expected_root_identity_value,
-    jstring expected_parent_identity_value) {
+    jstring expected_parent_identity_value, jstring expected_leaf_identity_value) {
   try {
     std::string root;
     std::string relative_parent;
     std::string leaf;
     std::string expected_root_identity;
     std::string expected_parent_identity;
+    std::string expected_leaf_identity;
     if (!appendUtf8(env, root_value, &root) ||
         !appendUtf8(env, relative_parent_value, &relative_parent) ||
         !appendUtf8(env, leaf_value, &leaf) ||
-        !appendUtf8(env, expected_root_identity_value, &expected_root_identity)) {
+        !appendUtf8(env, expected_root_identity_value, &expected_root_identity) ||
+        !appendUtf8(env, expected_leaf_identity_value, &expected_leaf_identity)) {
       throwIoException(env);
       return nullptr;
     }
@@ -1154,7 +1400,7 @@ Java_com_xingzhichen_landrop_MainActivity_captureReceiveEntryIdentityNative(
     std::string leaf_identity;
     const int error_number = captureReceiveEntryIdentity(
         root, relative_parent, leaf, expected_root_identity,
-        expected_parent_identity_pointer, &leaf_identity);
+        expected_parent_identity_pointer, expected_leaf_identity, &leaf_identity);
     if (error_number != 0) {
       throwIoException(env);
       return nullptr;

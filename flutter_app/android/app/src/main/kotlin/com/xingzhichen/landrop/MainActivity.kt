@@ -25,12 +25,23 @@ class MainActivity : FlutterActivity() {
         expectedParentIdentity: String?,
     ): String
 
+    private external fun publishReceiveEntryNative(
+        root: String,
+        relativeParent: String,
+        leaf: String,
+        destinationLeaf: String,
+        expectedRootIdentity: String,
+        expectedParentIdentity: String?,
+        expectedLeafIdentity: String,
+    ): Int
+
     private external fun captureReceiveEntryIdentityNative(
         root: String,
         relativeParent: String,
         leaf: String,
         expectedRootIdentity: String,
         expectedParentIdentity: String?,
+        expectedLeafIdentity: String,
     ): String
 
     private external fun prepareReceiveQuarantineNative(
@@ -95,6 +106,7 @@ class MainActivity : FlutterActivity() {
             val method = call.method
             val isReceiveMethod = method == "captureReceiveDirectoryIdentity" ||
                 method == "createReceiveEntry" ||
+                method == "publishReceiveEntry" ||
                 method == "captureReceiveEntryIdentity" ||
                 method == "prepareReceiveQuarantine" ||
                 method == "unlinkReceiveEntry" ||
@@ -399,17 +411,32 @@ class MainActivity : FlutterActivity() {
                 )
                 return@setMethodCallHandler
             }
-            val expectedLeafIdentity = if (method == "unlinkReceiveEntry" ||
-                method == "prepareReceiveQuarantine") {
+            val needsExpectedLeafIdentity = method == "captureReceiveEntryIdentity" ||
+                method == "publishReceiveEntry" ||
+                method == "unlinkReceiveEntry" ||
+                method == "prepareReceiveQuarantine"
+            val expectedLeafIdentity = if (needsExpectedLeafIdentity) {
                 arguments["expectedLeafIdentity"] as? String
             } else {
                 null
             }
-            if ((method == "unlinkReceiveEntry" || method == "prepareReceiveQuarantine") &&
-                expectedLeafIdentity == null) {
+            if (needsExpectedLeafIdentity && expectedLeafIdentity == null) {
                 result.error(
                     "invalid_arguments",
                     "Expected an expectedLeafIdentity string.",
+                    null,
+                )
+                return@setMethodCallHandler
+            }
+            val destinationLeaf = if (method == "publishReceiveEntry") {
+                arguments["destinationLeaf"] as? String
+            } else {
+                null
+            }
+            if (method == "publishReceiveEntry" && destinationLeaf == null) {
+                result.error(
+                    "invalid_arguments",
+                    "Expected a destinationLeaf string.",
                     null,
                 )
                 return@setMethodCallHandler
@@ -490,6 +517,25 @@ class MainActivity : FlutterActivity() {
             secureFsExecutor.execute {
                 try {
                     when (method) {
+                        "publishReceiveEntry" -> {
+                            val errorNumber = publishReceiveEntryNative(
+                                root,
+                                relativeParent,
+                                leaf,
+                                destinationLeaf!!,
+                                expectedRootIdentity,
+                                expectedParentIdentity,
+                                expectedLeafIdentity!!,
+                            )
+                            when (errorNumber) {
+                                0 -> mainHandler.post { result.success(true) }
+                                android.system.OsConstants.EEXIST ->
+                                    mainHandler.post { result.success(false) }
+                                else -> throw IOException(
+                                    "Secure receive-entry move failed (errno $errorNumber).",
+                                )
+                            }
+                        }
                         "createReceiveEntry" -> {
                             val leafIdentity = createReceiveEntryNative(
                                 root,
@@ -507,6 +553,7 @@ class MainActivity : FlutterActivity() {
                                 leaf,
                                 expectedRootIdentity,
                                 expectedParentIdentity,
+                                expectedLeafIdentity!!,
                             )
                             mainHandler.post { result.success(mapOf("leafIdentity" to leafIdentity)) }
                         }

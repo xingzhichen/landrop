@@ -2780,7 +2780,11 @@ class LanDropController extends ChangeNotifier {
       return;
     }
     final server = _servers[page.id];
-    if (server == null) return;
+    if (server == null) {
+      await _rejectUpload(
+          request, HttpStatus.serviceUnavailable, '上传服务正在停止，请稍后重试');
+      return;
+    }
     if (_activeUploadCount >= _maxConcurrentUploads) {
       await _rejectUpload(
           request, HttpStatus.tooManyRequests, '当前上传任务较多，请稍后重试');
@@ -2830,6 +2834,8 @@ class LanDropController extends ChangeNotifier {
     var recordPersistenceAttempted = false;
     ReceivedFile? pendingRecord;
     var bodyStarted = false;
+    var deferUncommittedErrorResponse = false;
+    int? deferredErrorStatus;
     void checkActive() {
       if (upload.cancelled.isCompleted || _servers[page.id] != server) {
         throw _UploadCancelled();
@@ -2905,6 +2911,7 @@ class LanDropController extends ChangeNotifier {
         leaf: p.basename(temporary.path),
         expectedRootIdentity: directoryIdentity.rootIdentity,
         expectedParentIdentity: directoryIdentity.parentIdentity,
+        expectedLeafIdentity: createdIdentity.value,
       );
       if (currentLeafIdentity.value != secureLeafIdentity) {
         throw FileSystemException(
@@ -2954,34 +2961,31 @@ class LanDropController extends ChangeNotifier {
         savedName = index == 0 ? name : '$stem ($index)$extension';
         final candidate =
             File('${directory.path}${Platform.pathSeparator}$savedName');
-        try {
-          // Reserve exclusively through the validated parent handle, retaining
-          // the placeholder identity for safe cleanup if the rename fails.
-          final reservedIdentity = await SecureReceiveFile.createReceiveEntry(
-            root: resolvedRoot,
-            relativeParent: relativeParent,
-            leaf: p.basename(candidate.path),
-            expectedRootIdentity: directoryIdentity.rootIdentity,
-            expectedParentIdentity: directoryIdentity.parentIdentity,
-          );
-          destination = candidate;
-          secureDestinationLeafIdentity = reservedIdentity.value;
-          destinationCreated = true;
-          break;
-        } on FileSystemException {
-          if (!await FileSystemEntity.isFile(candidate.path) &&
-              !await FileSystemEntity.isDirectory(candidate.path) &&
-              !await FileSystemEntity.isLink(candidate.path)) {
-            rethrow;
-          }
+        // Mark the intended destination before native publication: if the
+        // channel response is lost after the atomic move, pinned cleanup can
+        // still remove this exact inode. Errors after this point are reported
+        // only after the rollback attempt in finally.
+        destination = candidate;
+        secureDestinationLeafIdentity = secureLeafIdentity;
+        destinationCreated = true;
+        deferUncommittedErrorResponse = true;
+        final published = await SecureReceiveFile.publishReceiveEntry(
+          root: resolvedRoot,
+          relativeParent: relativeParent,
+          leaf: p.basename(temporary.path),
+          destinationLeaf: p.basename(candidate.path),
+          expectedRootIdentity: directoryIdentity.rootIdentity,
+          expectedParentIdentity: directoryIdentity.parentIdentity,
+          expectedLeafIdentity: secureLeafIdentity,
+        );
+        if (!published) {
+          destinationCreated = false;
+          secureDestinationLeafIdentity = null;
+          continue;
         }
+        temporaryCreated = false;
+        break;
       }
-      checkActive();
-      await temporary.rename(destination.path);
-      temporaryCreated = false;
-      // Rename preserves the source file object; the final path now has its
-      // captured identity rather than the temporary reservation identity.
-      secureDestinationLeafIdentity = secureLeafIdentity;
       checkActive();
       await verifyReceiveDirectoryIdentity();
       pendingRecord = ReceivedFile(
@@ -3001,18 +3005,28 @@ class LanDropController extends ChangeNotifier {
       await _uploadJson(
           response, HttpStatus.created, {'name': savedName, 'size': size});
     } on _UploadCancelled {
-      await _closeAfterError(response, HttpStatus.badRequest);
+      if (deferUncommittedErrorResponse && !committed) {
+        deferredErrorStatus = HttpStatus.badRequest;
+      } else {
+        await _closeAfterError(response, HttpStatus.badRequest);
+      }
     } on _UploadTooLarge {
       await _uploadJson(response, HttpStatus.requestEntityTooLarge,
           {'error': 'File exceeds 1 GiB'});
     } on HttpException {
-      await _closeAfterError(response, HttpStatus.badRequest);
+      if (deferUncommittedErrorResponse && !committed) {
+        deferredErrorStatus = HttpStatus.badRequest;
+      } else {
+        await _closeAfterError(response, HttpStatus.badRequest);
+      }
     } on SocketException {
       // Disconnected request: finally removes partial files.
     } catch (_) {
       if (!bodyStarted) {
         await _rejectSubscribedUpload(request, input, pendingBody,
             HttpStatus.internalServerError, {'error': 'Cannot save file'});
+      } else if (deferUncommittedErrorResponse && !committed) {
+        deferredErrorStatus = HttpStatus.internalServerError;
       } else {
         await _closeAfterError(response, HttpStatus.internalServerError);
       }
@@ -3088,6 +3102,8 @@ class LanDropController extends ChangeNotifier {
           _cancelActions.remove(task.id);
           _pruneTransferTasks();
           notifyListeners();
+          final status = deferredErrorStatus;
+          if (status != null) await _closeAfterError(response, status);
           upload.done.complete();
         }
       }
@@ -4382,6 +4398,7 @@ class LanDropController extends ChangeNotifier {
             leaf: p.basename(path),
             expectedRootIdentity: currentIdentity.rootIdentity,
             expectedParentIdentity: currentIdentity.parentIdentity,
+            expectedLeafIdentity: savedLeafIdentity,
           );
           if (currentLeafIdentity.value != savedLeafIdentity) {
             _retainUnrestoredSession(raw, pageId);
@@ -4447,6 +4464,7 @@ class LanDropController extends ChangeNotifier {
       leaf: p.basename(session.path),
       expectedRootIdentity: expectedRootIdentity,
       expectedParentIdentity: session.receiveParentIdentity,
+      expectedLeafIdentity: expectedLeafIdentity,
     );
     if (currentLeafIdentity.value != expectedLeafIdentity) {
       throw FileSystemException(
@@ -5255,6 +5273,7 @@ class LanDropController extends ChangeNotifier {
           leaf: p.basename(canonicalPath),
           expectedRootIdentity: directoryIdentity.rootIdentity,
           expectedParentIdentity: directoryIdentity.parentIdentity,
+          expectedLeafIdentity: createdIdentity.value,
         );
         if (leafIdentityAfterCreate.value != stored.receiveLeafIdentity) {
           throw FileSystemException(
@@ -5401,6 +5420,7 @@ class LanDropController extends ChangeNotifier {
       session.busy = true;
       session.completion = Completer<void>();
       File? destination;
+      var moveMayHaveCommitted = false;
       ReceivedFile? record;
       try {
         final source = await _safeSessionSource(session);
@@ -5413,22 +5433,54 @@ class LanDropController extends ChangeNotifier {
               response, 409, {...session.state, 'error': 'Upload incomplete'});
           return;
         }
-        destination = await _reserveName(source.parent, session.name);
-        await source.rename(destination.path);
-        var displayedPath = destination.path;
+        final receiveRoot = session.receiveRoot;
+        final canonicalRoot = session.canonicalRoot;
+        final rootIdentity = session.receiveRootIdentity;
+        final expectedLeafIdentity = session.receiveLeafIdentity;
+        if (receiveRoot == null ||
+            canonicalRoot == null ||
+            rootIdentity == null ||
+            expectedLeafIdentity == null) {
+          throw FileSystemException(
+              'Upload session has no pinned receive identity', session.path);
+        }
+        final relativeParent =
+            _relativeReceiveParent(receiveRoot, session.path);
+        final extension = p.extension(session.name);
+        final stem = p.basenameWithoutExtension(session.name);
+        for (var index = 0;; index++) {
+          final candidate = File(p.join(source.parent.path,
+              index == 0 ? session.name : '$stem ($index)$extension'));
+          destination = candidate;
+          moveMayHaveCommitted = true;
+          final moved = await SecureReceiveFile.publishReceiveEntry(
+            root: canonicalRoot,
+            relativeParent: relativeParent,
+            leaf: p.basename(source.path),
+            destinationLeaf: p.basename(candidate.path),
+            expectedRootIdentity: rootIdentity,
+            expectedParentIdentity: session.receiveParentIdentity,
+            expectedLeafIdentity: expectedLeafIdentity,
+          );
+          if (moved) break;
+          destination = null;
+          moveMayHaveCommitted = false;
+        }
+        final publishedDestination = destination;
+        var displayedPath = publishedDestination.path;
         try {
           final originalParent = p.dirname(session.path);
           final resolvedParent =
               await Directory(originalParent).resolveSymbolicLinks();
-          if (p.equals(resolvedParent, destination.parent.path)) {
+          if (p.equals(resolvedParent, publishedDestination.parent.path)) {
             displayedPath =
-                p.join(originalParent, p.basename(destination.path));
+                p.join(originalParent, p.basename(publishedDestination.path));
           }
         } on FileSystemException {
           // The pinned canonical path is the fallback if its alias disappeared.
         }
         record = ReceivedFile(
-            name: p.basename(destination.path),
+            name: p.basename(publishedDestination.path),
             path: displayedPath,
             size: session.size,
             pageTitle: page.title,
@@ -5450,8 +5502,16 @@ class LanDropController extends ChangeNotifier {
           _receipts.remove(receipt.id);
           _sessions[session.id] = session;
           receivedFiles.remove(record);
-          await destination.rename(source.path);
-          destination = null;
+          final restored = await _restoreSessionPartial(
+              session, p.basename(publishedDestination.path));
+          moveMayHaveCommitted = false;
+          if (restored) {
+            destination = null;
+          } else {
+            // Do not overwrite an unexpected occupant at the partial path. The
+            // final file stays intact and this session is no longer resumable.
+            _markSessionUnavailable(session);
+          }
           // _persist writes received-file records before receipts. If that
           // later key failed, the failed snapshot may already have committed
           // this record; persist the rolled-back model as compensation so a
@@ -5472,6 +5532,18 @@ class LanDropController extends ChangeNotifier {
         await _uploadJson(
             response, 201, {'name': record.name, 'size': record.size});
       } catch (error) {
+        if (_sessions.containsKey(session.id) &&
+            moveMayHaveCommitted &&
+            destination != null) {
+          final restored = await _restoreSessionPartial(
+              session, p.basename(destination.path));
+          moveMayHaveCommitted = false;
+          if (restored) {
+            destination = null;
+          } else {
+            _markSessionUnavailable(session);
+          }
+        }
         if (_sessions.containsKey(session.id)) {
           _sessionTask(session).status = 'failed';
           if (error is FileSystemException &&
@@ -5490,22 +5562,59 @@ class LanDropController extends ChangeNotifier {
     await _rejectUpload(request, 405, 'Method not allowed');
   }
 
-  Future<File> _reserveName(Directory directory, String name) async {
-    final extension = p.extension(name);
-    final stem = p.basenameWithoutExtension(name);
-    for (var index = 0;; index++) {
-      final candidate = File(p.join(
-          directory.path, index == 0 ? name : '$stem ($index)$extension'));
+  Future<bool> _restoreSessionPartial(
+      _Session session, String publishedLeaf) async {
+    final receiveRoot = session.receiveRoot;
+    final canonicalRoot = session.canonicalRoot;
+    final rootIdentity = session.receiveRootIdentity;
+    final expectedLeafIdentity = session.receiveLeafIdentity;
+    final partialLeaf = p.basename(session.path);
+    if (receiveRoot == null ||
+        canonicalRoot == null ||
+        rootIdentity == null ||
+        expectedLeafIdentity == null ||
+        partialLeaf != '.${session.id}.part') {
+      return false;
+    }
+    final String relativeParent;
+    try {
+      relativeParent = _relativeReceiveParent(receiveRoot, session.path);
+    } on FileSystemException {
+      return false;
+    }
+
+    Future<bool> partialHasExpectedIdentity() async {
       try {
-        await candidate.create(exclusive: true);
-        return candidate;
-      } on FileSystemException {
-        if (await FileSystemEntity.type(candidate.path, followLinks: false) ==
-            FileSystemEntityType.notFound) {
-          rethrow;
-        }
+        final identity = await SecureReceiveFile.captureReceiveEntryIdentity(
+          root: canonicalRoot,
+          relativeParent: relativeParent,
+          leaf: partialLeaf,
+          expectedRootIdentity: rootIdentity,
+          expectedParentIdentity: session.receiveParentIdentity,
+          expectedLeafIdentity: expectedLeafIdentity,
+        );
+        return identity.value == expectedLeafIdentity;
+      } catch (_) {
+        return false;
       }
     }
+
+    if (await partialHasExpectedIdentity()) return true;
+    try {
+      final restored = await SecureReceiveFile.publishReceiveEntry(
+        root: canonicalRoot,
+        relativeParent: relativeParent,
+        leaf: publishedLeaf,
+        destinationLeaf: partialLeaf,
+        expectedRootIdentity: rootIdentity,
+        expectedParentIdentity: session.receiveParentIdentity,
+        expectedLeafIdentity: expectedLeafIdentity,
+      );
+      if (restored && await partialHasExpectedIdentity()) return true;
+    } catch (_) {
+      // A lost response is reconciled by verifying the original partial below.
+    }
+    return partialHasExpectedIdentity();
   }
 
   Future<void> _patchSession(

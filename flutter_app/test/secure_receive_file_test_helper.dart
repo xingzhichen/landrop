@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter/services.dart';
@@ -10,6 +11,11 @@ final Map<String, String> _leafIdentities = {};
 final Map<String, String> _quarantineIdentities = {};
 final Set<String> _managedUnlinkFailures = {};
 final Set<String> _receiveQuarantineFailures = {};
+final Map<String, String> _receivePublishCollisions = {};
+final Set<String> _receivePublishFailuresAfterMove = {};
+Completer<void>? _receivePublishFailureCleanup;
+String? _receivePublishFailureCleanupPath;
+Future<void> _receivePublishTail = Future<void>.value();
 var _nextDirectoryIdentity = 0;
 var _nextLeafIdentity = 0;
 
@@ -20,6 +26,34 @@ void failNextManagedFileUnlinkForTest(String leaf) {
 /// Simulate a process interruption after moving a partial into quarantine.
 void failNextReceiveQuarantineAfterRenameForTest(String sourceLeaf) {
   _receiveQuarantineFailures.add(sourceLeaf);
+}
+
+/// Simulate an unrelated file appearing after a raw upload chooses its name.
+void injectNextReceivePublishCollisionForTest(String path, String contents) {
+  _receivePublishCollisions[_directoryKey(path)] = contents;
+}
+
+/// Simulate a lost method-channel response after the native move commits.
+void failNextReceivePublishAfterMoveForTest(String destinationPath) {
+  final key = _directoryKey(destinationPath);
+  _receivePublishFailuresAfterMove.add(key);
+  _receivePublishFailureCleanupPath = key;
+  _receivePublishFailureCleanup = Completer<void>();
+}
+
+bool receivePublishFailureCleanupCompletedForTest() =>
+    _receivePublishFailureCleanup?.isCompleted ?? false;
+
+Future<T> _serializeReceivePublish<T>(Future<T> Function() action) async {
+  final previous = _receivePublishTail;
+  final completion = Completer<void>();
+  _receivePublishTail = completion.future;
+  await previous;
+  try {
+    return await action();
+  } finally {
+    completion.complete();
+  }
 }
 
 bool _isValidReceiveDate(String value) {
@@ -35,6 +69,16 @@ bool _isValidReceiveDate(String value) {
 
 final RegExp _uuidPattern = RegExp(
     r'^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$');
+final RegExp _receivePartLeafPattern = RegExp(
+    r'^\.[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.part$');
+
+bool _isSafeReceiveLeaf(String value) =>
+    value.isNotEmpty &&
+    value != '.' &&
+    value != '..' &&
+    !value.contains('/') &&
+    !value.contains('\\') &&
+    !value.contains('\u0000');
 
 String _directoryKey(String path) => p.normalize(p.absolute(path));
 
@@ -129,18 +173,8 @@ Future<String> _mockPrepareReceiveQuarantine({
   final targetKey = _directoryKey(target);
   final targetIdentity = _leafIdentityForPath(targetKey);
   if (targetIdentity != expectedLeafIdentity) {
-    // File.rename() moves the raw partial's inode over its destination
-    // reservation. The test fake cannot observe that rename, so transfer the
-    // pinned mock identity when it is still attached to the old temp pathname.
-    if (sourceMatch == null &&
-        _leafIdentities.values.contains(expectedLeafIdentity)) {
-      _leafIdentities.removeWhere((_, value) => value == expectedLeafIdentity);
-      _leafIdentities[targetKey] = expectedLeafIdentity;
-    } else {
-      throw PlatformException(
-          code: 'identity_mismatch',
-          message: 'Receive source identity changed');
-    }
+    throw PlatformException(
+        code: 'identity_mismatch', message: 'Receive source identity changed');
   }
 
   final rootDirectory =
@@ -475,6 +509,7 @@ void installSecureReceiveFileMock() {
       if (!<String>{
         'createReceiveEntry',
         'captureReceiveEntryIdentity',
+        'publishReceiveEntry',
         'prepareReceiveQuarantine',
         'unlinkReceiveEntry',
       }.contains(call.method)) {
@@ -539,10 +574,66 @@ void installSecureReceiveFileMock() {
         return <String, Object?>{'quarantineIdentity': identity};
       }
       if (call.method == 'createReceiveEntry') {
-        // The native bridge permits both generated UUID partials and a
-        // validated destination basename reserved before atomic replacement.
+        if (!RegExp(
+                r'^\.[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.part$')
+            .hasMatch(leaf)) {
+          throw PlatformException(
+              code: 'invalid_path', message: 'Invalid receive partial');
+        }
         await File(target).create(exclusive: true);
         return <String, Object?>{'leafIdentity': _leafIdentityForPath(target)};
+      }
+      if (call.method == 'publishReceiveEntry') {
+        return _serializeReceivePublish(() async {
+          final destinationLeaf = args['destinationLeaf'];
+          final expectedLeafIdentity = args['expectedLeafIdentity'];
+          if (destinationLeaf is! String || expectedLeafIdentity is! String) {
+            throw PlatformException(
+                code: 'invalid_path', message: 'Invalid receive move entry');
+          }
+          final sourceIsPart = _receivePartLeafPattern.hasMatch(leaf);
+          final destinationIsPart =
+              _receivePartLeafPattern.hasMatch(destinationLeaf);
+          if (sourceIsPart == destinationIsPart ||
+              !_isSafeReceiveLeaf(leaf) ||
+              !_isSafeReceiveLeaf(destinationLeaf)) {
+            throw PlatformException(
+                code: 'invalid_path', message: 'Invalid receive move entry');
+          }
+          if (await FileSystemEntity.type(target, followLinks: false) !=
+              FileSystemEntityType.file) {
+            throw PlatformException(
+                code: 'missing_leaf', message: 'Receive source is missing');
+          }
+          final sourceKey = _directoryKey(target);
+          final sourceIdentity = _leafIdentityForPath(sourceKey);
+          if (sourceIdentity != expectedLeafIdentity) {
+            throw PlatformException(
+                code: 'identity_mismatch', message: 'Receive source changed');
+          }
+          final destination = p.join(parent, destinationLeaf);
+          final destinationKey = _directoryKey(destination);
+          if (_receivePublishCollisions.containsKey(destinationKey)) {
+            final contents = _receivePublishCollisions.remove(destinationKey)!;
+            await File(destination).create(exclusive: true);
+            await File(destination).writeAsString(contents, flush: true);
+            _leafIdentities[destinationKey] = _nextLeafId();
+            return false;
+          }
+          if (await FileSystemEntity.type(destination, followLinks: false) !=
+              FileSystemEntityType.notFound) {
+            return false;
+          }
+          await File(target).rename(destination);
+          _leafIdentities.remove(sourceKey);
+          _leafIdentities[destinationKey] = sourceIdentity;
+          if (_receivePublishFailuresAfterMove.remove(destinationKey)) {
+            throw PlatformException(
+                code: 'lost_response',
+                message: 'Simulated lost publish response');
+          }
+          return true;
+        });
       }
 
       if (call.method == 'unlinkReceiveEntry' &&
@@ -568,6 +659,10 @@ void installSecureReceiveFileMock() {
           expectedQuarantineIdentity: expectedQuarantineIdentity,
           sourceParentMissing: sourceParentMissing,
         );
+        if (_receivePublishFailureCleanupPath == _directoryKey(target)) {
+          final cleanup = _receivePublishFailureCleanup;
+          if (cleanup != null && !cleanup.isCompleted) cleanup.complete();
+        }
         return null;
       }
 
@@ -582,7 +677,14 @@ void installSecureReceiveFileMock() {
             code: 'unsafe_leaf', message: 'Receive entry is not a file');
       }
       if (call.method == 'captureReceiveEntryIdentity') {
-        return <String, Object?>{'leafIdentity': _leafIdentityForPath(target)};
+        final expectedLeafIdentity = args['expectedLeafIdentity'];
+        final actualLeafIdentity = _leafIdentityForPath(target);
+        if (expectedLeafIdentity is! String ||
+            expectedLeafIdentity != actualLeafIdentity) {
+          throw PlatformException(
+              code: 'identity_mismatch', message: 'Receive entry changed');
+        }
+        return <String, Object?>{'leafIdentity': actualLeafIdentity};
       }
 
       final expectedLeafIdentity = args['expectedLeafIdentity'];

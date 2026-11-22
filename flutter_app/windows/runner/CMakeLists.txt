@@ -9,6 +9,8 @@ project(runner LANGUAGES CXX)
 add_executable(${BINARY_NAME} WIN32
   "flutter_window.cpp"
   "main.cpp"
+  "private_receive_entry.cpp"
+  "private_receive_security.cpp"
   "secure_fs.cpp"
   "utils.cpp"
   "win32_window.cpp"
@@ -34,8 +36,23 @@ target_compile_definitions(${BINARY_NAME} PRIVATE "NOMINMAX")
 # Add dependency libraries and include directories. Add any application-specific
 # dependencies here.
 target_link_libraries(${BINARY_NAME} PRIVATE flutter flutter_wrapper_app)
-target_link_libraries(${BINARY_NAME} PRIVATE "dwmapi.lib" "shell32.lib" "ole32.lib")
+target_link_libraries(${BINARY_NAME} PRIVATE "dwmapi.lib" "shell32.lib" "ole32.lib" "advapi32.lib")
 target_include_directories(${BINARY_NAME} PRIVATE "${CMAKE_SOURCE_DIR}")
+
+# Build on demand from CI to verify that protected receive-file ACLs suppress
+# permissive parent-directory inheritance on a real Windows filesystem.
+add_executable(secure_fs_acl_test EXCLUDE_FROM_ALL
+  "private_receive_entry.cpp"
+  "private_receive_security.cpp"
+  "secure_fs_acl_test.cpp"
+)
+target_compile_features(secure_fs_acl_test PRIVATE cxx_std_17)
+target_compile_definitions(secure_fs_acl_test PRIVATE "NOMINMAX")
+target_link_libraries(secure_fs_acl_test PRIVATE "advapi32.lib")
+set_target_properties(secure_fs_acl_test PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/secure_fs_acl_test"
+  RUNTIME_OUTPUT_DIRECTORY_RELEASE "${CMAKE_BINARY_DIR}/secure_fs_acl_test"
+)
 
 # Run the Flutter tool portions of the build. This must not be removed.
 add_dependencies(${BINARY_NAME} flutter_assemble)
