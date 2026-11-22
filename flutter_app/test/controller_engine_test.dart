@@ -2377,6 +2377,45 @@ void main() {
         'must not be read from replacement');
   });
 
+  test('shared download rejects ancestor replacement just before reading',
+      () async {
+    await controller.shutdown();
+    controller.dispose();
+    SharedPreferences.setMockInitialValues({});
+    final selectedRoot = p.join(directory.path, 'selected-shared');
+    final movedRoot = p.join(directory.path, 'moved-shared');
+    final outsideRoot = p.join(directory.path, 'outside-shared');
+    controller = LanDropController(
+      receiveDirectory: directory,
+      beforeFileStream: () async {
+        await Directory(selectedRoot).rename(movedRoot);
+        await Link(selectedRoot).create(outsideRoot);
+      },
+    );
+    await controller.initialize();
+    controller.mobileForTesting = false;
+    page = await controller.createPage('Shared pre-read race');
+    await controller.start(page);
+    port = controller.portFor(page)!;
+
+    final selectedSource = File(p.join(selectedRoot, 'sub', 'a.txt'));
+    await selectedSource.parent.create(recursive: true);
+    await selectedSource.writeAsString('inside!!');
+    final outsideSource = File(p.join(outsideRoot, 'sub', 'a.txt'));
+    await outsideSource.parent.create(recursive: true);
+    await outsideSource.writeAsString('secret!!');
+    await controller.addPaths(page, [selectedSource.path]);
+
+    final response =
+        await request(port, 'GET', '/file/${page.files.single.id}');
+
+    expect(response.status, HttpStatus.notFound);
+    expect(response.bytes, isEmpty);
+    expect(await File(p.join(movedRoot, 'sub', 'a.txt')).readAsString(),
+        'inside!!');
+    expect(await outsideSource.readAsString(), 'secret!!');
+  });
+
   test('managed ZIP stages multi-chunk sources with pinned reads', () async {
     controller.mobileForTesting = false;
     final managedDirectory = Directory(p.join(directory.path, 'managed-files'));
@@ -2439,6 +2478,46 @@ void main() {
     expect(controller.zipWorkerSpawnCountForTesting, workersBefore);
     expect(await File(managedFile.path).readAsString(),
         'must not reach the zip worker');
+  });
+
+  test('ZIP rejects ancestor replacement after source validation', () async {
+    await controller.shutdown();
+    controller.dispose();
+    SharedPreferences.setMockInitialValues({});
+    final selectedRoot = p.join(directory.path, 'zip-selected');
+    final movedRoot = p.join(directory.path, 'zip-moved');
+    final outsideRoot = p.join(directory.path, 'zip-outside');
+    controller = LanDropController(
+      receiveDirectory: directory,
+      beforeZipBuild: () async {
+        await Directory(selectedRoot).rename(movedRoot);
+        await Link(selectedRoot).create(outsideRoot);
+      },
+    );
+    await controller.initialize();
+    controller.mobileForTesting = false;
+    page = await controller.createPage('Shared ZIP pre-build race');
+    await controller.start(page);
+    port = controller.portFor(page)!;
+
+    final selectedSource = File(p.join(selectedRoot, 'sub', 'a.txt'));
+    await selectedSource.parent.create(recursive: true);
+    await selectedSource.writeAsString('inside!!');
+    final outsideSource = File(p.join(outsideRoot, 'sub', 'a.txt'));
+    await outsideSource.parent.create(recursive: true);
+    await outsideSource.writeAsString('secret!!');
+    await controller.addPaths(page, [selectedSource.path]);
+    final workersBefore = controller.zipWorkerSpawnCountForTesting;
+
+    final response =
+        await request(port, 'GET', '/download.zip?ids=${page.files.single.id}');
+
+    expect(response.status, HttpStatus.internalServerError);
+    expect(response.bytes, isEmpty);
+    expect(controller.zipWorkerSpawnCountForTesting, workersBefore);
+    expect(await File(p.join(movedRoot, 'sub', 'a.txt')).readAsString(),
+        'inside!!');
+    expect(await outsideSource.readAsString(), 'secret!!');
   });
 
   test('legacy managed share gets one-time leaf pin and keeps it', () async {
@@ -3364,6 +3443,9 @@ void main() {
         await controller.start(page);
         port = controller.portFor(page)!;
       }
+      // The task can be marked paused before its handler releases the session
+      // busy lock, especially on Windows while async cleanup is still running.
+      await until(() => controller.uploadRegistryPageCountForTesting == 0);
       final resumed = await request(port, 'GET', '/uploads/$id');
       expect(resumed.json['offset'], 7);
       final appended =
@@ -4323,6 +4405,53 @@ void main() {
         await request(otherPort, 'GET', '/file/${otherPage.files.single.id}');
     expect(afterRelease.status, 200);
     expect(utf8.decode(afterRelease.bytes), 'download payload');
+  });
+
+  test('ZIP worker rejects a path replaced after source validation', () async {
+    final selectedRoot = Directory(p.join(directory.path, 'worker-selected'));
+    final selectedSub = Directory(p.join(selectedRoot.path, 'sub'));
+    await selectedSub.create(recursive: true);
+    final source = File(p.join(selectedSub.path, 'a.txt'));
+    await source.writeAsString('inside!!');
+    final expectedSource = await source.resolveSymbolicLinks();
+    final movedRoot = p.join(directory.path, 'worker-moved');
+    final outsideRoot = Directory(p.join(directory.path, 'worker-outside'));
+    await Directory(p.join(outsideRoot.path, 'sub')).create(recursive: true);
+    final outsideSource = File(p.join(outsideRoot.path, 'sub', 'a.txt'));
+    await outsideSource.writeAsString('secret!!');
+    await selectedRoot.rename(movedRoot);
+    await Link(selectedRoot.path).create(outsideRoot.path);
+
+    final output = File(p.join(directory.path, 'worker-replaced.zip'));
+    final cancellation = File(p.join(directory.path, 'worker-replaced-cancel'));
+    final messages = ReceivePort();
+    final exits = ReceivePort();
+    final result = messages.first;
+    final exited = exits.first;
+    await Isolate.spawn(
+        buildZipWorker,
+        <Object>[
+          messages.sendPort,
+          output.path,
+          [
+            [source.path, 'a.txt', expectedSource]
+          ],
+          cancellation.path,
+        ],
+        onExit: exits.sendPort);
+    try {
+      final reply = await result.timeout(const Duration(seconds: 5)) as Map;
+      expect(reply['error'], contains('Unsafe archive source'));
+      await exited.timeout(const Duration(seconds: 5));
+      expect(await output.length(), 0);
+      expect(await File(p.join(movedRoot, 'sub', 'a.txt')).readAsString(),
+          'inside!!');
+      expect(await outsideSource.readAsString(), 'secret!!');
+    } finally {
+      messages.close();
+      exits.close();
+      if (await output.exists()) await output.delete();
+    }
   });
 
   test('ZIP worker cancellation closes native source and output before exit',

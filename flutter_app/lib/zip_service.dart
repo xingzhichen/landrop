@@ -3,6 +3,7 @@ import 'dart:isolate';
 import 'dart:typed_data';
 
 import 'package:archive/archive_io.dart';
+import 'package:path/path.dart' as p;
 
 /// Cancellation is checked at the native read boundary, including archive's
 /// CRC pass. A marker works while this worker is busy in synchronous encoding;
@@ -24,11 +25,16 @@ class _ZipCancelled implements Exception {
   String toString() => 'ZIP cancelled';
 }
 
+bool _matchesExpectedCanonicalPath(String source, String expected) =>
+    p.equals(File(source).resolveSymbolicLinksSync(), expected);
+
 /// Builds a streamed, disk-backed STORE ZIP (including ZIP64) off the UI isolate.
-/// args: result port, output path, whitelisted [source, name] entries, cancel path,
-/// and optionally an observer port used by handle-lifecycle integration tests.
-/// The result is sent only AFTER every native input/output handle is closed.
-/// The owner must also await the isolate's onExit before removing its directory.
+/// args: result port, output path, whitelisted [source, name, optional expected
+/// canonical source path] entries, cancel path, and optionally an observer port
+/// used by handle-lifecycle integration tests. Canonical paths are checked both
+/// before and after opening the input handle. The result is sent only AFTER every
+/// native input/output handle is closed. The owner must also await onExit before
+/// removing its directory.
 void buildZipWorker(List<Object> arguments) {
   final port = arguments[0] as SendPort;
   final destination = arguments[1] as String;
@@ -43,12 +49,21 @@ void buildZipWorker(List<Object> arguments) {
     final encoder = ZipEncoder(streamed: true)..startEncode(output, level: 0);
     for (final entry in entries) {
       if (cancellation.existsSync()) throw const _ZipCancelled();
+      final expectedPath = entry.length > 2 ? entry[2] : null;
       if (FileSystemEntity.typeSync(entry[0], followLinks: false) !=
-          FileSystemEntityType.file) {
+              FileSystemEntityType.file ||
+          (expectedPath != null &&
+              !_matchesExpectedCanonicalPath(entry[0], expectedPath))) {
         throw const FileSystemException('Unsafe archive source');
       }
       final handle = _CancellableFileHandle(entry[0], cancellation);
       try {
+        // Opening the handle pins the file even if an ancestor changes later.
+        // Recheck the path after open, before the worker reads any content.
+        if (expectedPath != null &&
+            !_matchesExpectedCanonicalPath(entry[0], expectedPath)) {
+          throw const FileSystemException('Unsafe archive source');
+        }
         // FileBuffer performs its first native read in this constructor. Keep
         // the handle in scope even if cancellation interrupts construction.
         final input = InputFileStream.withFileHandle(handle);

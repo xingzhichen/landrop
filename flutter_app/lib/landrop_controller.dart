@@ -266,11 +266,13 @@ class _ZipInput {
   const _ZipInput({
     required this.source,
     required this.name,
+    required this.sharedFile,
     this.managedFile,
   });
 
   final File source;
   final String name;
+  final SharedFile sharedFile;
   final SharedFile? managedFile;
 }
 
@@ -3459,18 +3461,48 @@ class LanDropController extends ChangeNotifier {
         }
         _activeFileDownloads++;
       }
+      RandomAccessFile? openedSharedSource;
       try {
-        final source = await _safeSharedSource(selected);
-        if (source == null) {
+        final initialSource = await _safeSharedSource(selected);
+        if (initialSource == null) {
           response.statusCode = HttpStatus.notFound;
           await response.close();
           return;
+        }
+        var source = initialSource;
+        if (request.method == 'GET') {
+          await _beforeFileStream?.call();
+          if (!_servers.containsKey(page.id)) return;
+          if (!selected.managed) {
+            final afterHook = await _safeSharedSource(selected);
+            if (afterHook == null ||
+                !p.equals(afterHook.path, initialSource.path)) {
+              await _closeAfterError(response, HttpStatus.notFound);
+              return;
+            }
+            source = afterHook;
+          }
+        }
+        if (isFileDownload && !selected.managed) {
+          openedSharedSource = await source.open();
+          final afterOpen = await _safeSharedSource(selected);
+          if (afterOpen == null || !p.equals(afterOpen.path, source.path)) {
+            await _closeAfterError(response, HttpStatus.notFound);
+            return;
+          }
         }
         final managedMetadata = selected.managed
             ? await _readManagedFileChunk(selected, 0, 1)
             : null;
         final stat = managedMetadata == null ? await source.stat() : null;
-        final length = managedMetadata?.fileLength ?? stat!.size;
+        final int length = managedMetadata?.fileLength ??
+            (openedSharedSource == null
+                ? stat!.size
+                : await openedSharedSource.length());
+        if (openedSharedSource != null && stat!.size != length) {
+          throw FileSystemException(
+              'Shared file changed while opening', source.path);
+        }
         final modified = managedMetadata == null
             ? stat!.modified.toUtc()
             : DateTime.fromMicrosecondsSinceEpoch(
@@ -3542,8 +3574,6 @@ class LanDropController extends ChangeNotifier {
         }
         response.contentLength = endExclusive - start;
         if (request.method == 'GET') {
-          await _beforeFileStream?.call();
-          if (!_servers.containsKey(page.id)) return;
           if (selected.managed) {
             final firstChunk = await _readManagedFileChunk(
               selected,
@@ -3578,11 +3608,22 @@ class LanDropController extends ChangeNotifier {
             );
           } else {
             await _streamDownload(
-                page, response, source, name, start, endExclusive);
+              page,
+              response,
+              source,
+              name,
+              start,
+              endExclusive,
+              sourceStream: () => _fileHandleRangeStream(
+                  openedSharedSource!, start, endExclusive),
+            );
           }
         }
         await response.close();
       } finally {
+        try {
+          await openedSharedSource?.close();
+        } catch (_) {}
         if (isFileDownload) _activeFileDownloads--;
       }
     } on SocketException {
@@ -5807,6 +5848,23 @@ class LanDropController extends ChangeNotifier {
     }[p.extension(name).toLowerCase()];
   }
 
+  /// Reads from an already-open handle so a later ancestor rename or symlink
+  /// replacement cannot redirect a shared-file download to a different path.
+  Stream<List<int>> _fileHandleRangeStream(
+      RandomAccessFile source, int start, int end) async* {
+    await source.setPosition(start);
+    var remaining = end - start;
+    while (remaining > 0) {
+      final bytes = await source.read(min(64 * 1024, remaining));
+      if (bytes.isEmpty) {
+        throw const FileSystemException(
+            'Shared file ended before the requested range completed');
+      }
+      remaining -= bytes.length;
+      yield bytes;
+    }
+  }
+
   Stream<List<int>> _managedFileRangeStream({
     required SharedFile file,
     required int start,
@@ -6088,6 +6146,7 @@ class LanDropController extends ChangeNotifier {
         entries.add(_ZipInput(
           source: source,
           name: name,
+          sharedFile: file,
           managedFile: file.managed ? file : null,
         ));
       }
@@ -6229,7 +6288,19 @@ class LanDropController extends ChangeNotifier {
         final entry = entries[index];
         final managedFile = entry.managedFile;
         if (managedFile == null) {
-          workerEntries.add([entry.source.path, entry.name]);
+          File? currentSource;
+          try {
+            currentSource = await _safeSharedSource(entry.sharedFile);
+          } on FileSystemException {
+            // Fall through to fail closed before the ZIP worker starts.
+          }
+          if (currentSource == null ||
+              !p.equals(currentSource.path, entry.source.path)) {
+            throw FileSystemException(
+                'Unsafe archive source', entry.source.path);
+          }
+          workerEntries
+              .add([currentSource.path, entry.name, entry.source.path]);
           continue;
         }
         final snapshot =
@@ -6238,16 +6309,20 @@ class LanDropController extends ChangeNotifier {
         workerEntries.add([snapshot.path, entry.name]);
       }
     } catch (_) {
-      try {
-        await _beforeZipCleanup?.call();
-      } finally {
-        await cleanupTemporary();
+      if (!job.cancelled && job.task.status == 'active') {
+        job.task.status = 'failed';
+        notifyListeners();
       }
       await _closeAfterError(
           request.response,
           job.cancelled
               ? HttpStatus.badRequest
               : HttpStatus.internalServerError);
+      try {
+        await _beforeZipCleanup?.call();
+      } finally {
+        await cleanupTemporary();
+      }
       return;
     }
     final task = job.task;
